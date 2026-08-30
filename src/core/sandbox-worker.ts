@@ -3,6 +3,7 @@ import { parentPort, workerData } from "node:worker_threads";
 import { getQuickJS } from "quickjs-emscripten";
 
 import { ReadOnlyCapabilityHost } from "./capabilities.js";
+import { truncateUtf8 } from "./output.js";
 import {
   CODE_MODE_TOOL_NAMES,
   type CodeModeToolName,
@@ -45,7 +46,18 @@ function stringifyDump(value: unknown): string {
   }
 }
 
-function buildSource(code: string): string {
+function parseProgramResult(value: unknown): { output: string; truncated: boolean } {
+  if (
+    !isRecord(value) ||
+    typeof value["output"] !== "string" ||
+    typeof value["truncated"] !== "boolean"
+  ) {
+    throw new Error("sandbox returned an invalid result");
+  }
+  return { output: value["output"], truncated: value["truncated"] };
+}
+
+function buildSource(code: string, maxOutputBytes: number): string {
   return `(async (__hostCall) => {
   "use strict";
   const call = (name, input = {}) => {
@@ -59,26 +71,59 @@ function buildSource(code: string): string {
     find: (input) => call("find", input),
     ls: (input) => call("ls", input),
   });
-  const output = [];
+  const maxOutputBytes = ${String(maxOutputBytes)};
+  let output = "";
+  let outputBytes = 0;
+  let hasOutput = false;
+  let outputTruncated = false;
+  const utf8Width = (codePoint) => {
+    if (codePoint <= 0x7f) return 1;
+    if (codePoint <= 0x7ff) return 2;
+    if (codePoint <= 0xffff) return 3;
+    return 4;
+  };
+  const takeUtf8Prefix = (value, maxBytes) => {
+    let bytes = 0;
+    let end = 0;
+    for (const character of value) {
+      const width = utf8Width(character.codePointAt(0));
+      if (bytes + width > maxBytes) break;
+      bytes += width;
+      end += character.length;
+    }
+    return { text: value.slice(0, end), bytes, truncated: end < value.length };
+  };
+  const append = (value) => {
+    const bounded = takeUtf8Prefix(value, maxOutputBytes - outputBytes);
+    output += bounded.text;
+    outputBytes += bounded.bytes;
+    outputTruncated ||= bounded.truncated;
+  };
   const text = (value) => {
+    if (hasOutput) append("\\n");
+    hasOutput = true;
+    if (outputBytes >= maxOutputBytes) {
+      outputTruncated = true;
+      return;
+    }
     if (typeof value === "string") {
-      output.push(value);
+      append(value);
       return;
     }
     if (value === undefined) {
-      output.push("undefined");
+      append("undefined");
       return;
     }
     try {
-      output.push(JSON.stringify(value));
+      append(JSON.stringify(value));
     } catch {
-      output.push(String(value));
+      append(String(value));
     }
   };
   await (async () => {
 ${code}
   })();
-  return JSON.stringify({ output: output.join("\\n") });
+  return JSON.stringify({ output, truncated: outputTruncated });
 })(globalThis.__piCodeModeHostCall)`;
 }
 
@@ -108,7 +153,10 @@ async function run(request: WorkerRequest): Promise<WorkerResponse> {
     context.setProp(context.global, "__piCodeModeHostCall", hostCall);
     hostCall.dispose();
 
-    const evaluation = context.evalCode(buildSource(request.code), "code-mode.js");
+    const evaluation = context.evalCode(
+      buildSource(request.code, request.limits.maxOutputBytes),
+      "code-mode.js",
+    );
     if (evaluation.error) {
       const dumped: unknown = context.dump(evaluation.error);
       evaluation.error.dispose();
@@ -135,13 +183,17 @@ async function run(request: WorkerRequest): Promise<WorkerResponse> {
 
     const resultText = context.getString(state.value);
     state.value.dispose();
-    const parsed = JSON.parse(resultText) as unknown;
-    if (!isRecord(parsed) || typeof parsed["output"] !== "string") {
-      throw new Error("sandbox returned an invalid result");
-    }
-    return { ok: true, output: parsed["output"], stats: host.stats };
+    const parsed = parseProgramResult(JSON.parse(resultText) as unknown);
+    const bounded = truncateUtf8(parsed.output, request.limits.maxOutputBytes);
+    return {
+      ok: true,
+      output: bounded.text,
+      truncated: parsed.truncated || bounded.truncated,
+      stats: host.stats,
+    };
   } catch (error) {
-    return { ok: false, error: errorMessage(error), stats: host.stats };
+    const boundedError = truncateUtf8(errorMessage(error), request.limits.maxOutputBytes);
+    return { ok: false, error: boundedError.text, stats: host.stats };
   } finally {
     context.dispose();
     runtime.dispose();

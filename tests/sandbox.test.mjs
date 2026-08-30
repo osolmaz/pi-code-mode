@@ -228,12 +228,19 @@ text({ found, matches });`);
     expect(result.error).toContain("tool call limit");
   });
 
-  it("truncates final output at a UTF-8 boundary", async () => {
-    const result = await run('text("x".repeat(2_000));', { limits: { maxOutputBytes: 128 } });
+  it("bounds worker output and truncates it at a UTF-8 boundary", async () => {
+    const result = await run('text("x".repeat(5_000_000));', {
+      limits: { maxOutputBytes: 128 },
+    });
+    const repeated = await run('for (let i = 0; i < 100; i += 1) text("small");', {
+      limits: { maxOutputBytes: 64 },
+    });
     const unicode = await run('text("😀");', { limits: { maxOutputBytes: 3 } });
 
     expect(result).toMatchObject({ status: "completed", truncated: true });
-    expect(Buffer.byteLength(result.output, "utf8")).toBeLessThanOrEqual(128);
+    expect(Buffer.byteLength(result.output, "utf8")).toBe(128);
+    expect(repeated).toMatchObject({ status: "completed", truncated: true });
+    expect(Buffer.byteLength(repeated.output, "utf8")).toBeLessThanOrEqual(64);
     expect(unicode).toMatchObject({ status: "completed", output: "", truncated: true });
   });
 });

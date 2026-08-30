@@ -5,6 +5,7 @@ import { Worker } from "node:worker_threads";
 
 import { digestProgram } from "./approval.js";
 import { resolveLimits } from "./limits.js";
+import { truncateUtf8 } from "./output.js";
 import type {
   CodeModeExecution,
   ExecuteProgramOptions,
@@ -27,10 +28,20 @@ function isStats(value: unknown): value is ExecutionStats {
 }
 
 function parseSuccessfulResponse(value: Record<string, unknown>): WorkerResponse | undefined {
-  if (value["ok"] !== true || typeof value["output"] !== "string" || !isStats(value["stats"])) {
+  if (
+    value["ok"] !== true ||
+    typeof value["output"] !== "string" ||
+    typeof value["truncated"] !== "boolean" ||
+    !isStats(value["stats"])
+  ) {
     return undefined;
   }
-  return { ok: true, output: value["output"], stats: value["stats"] };
+  return {
+    ok: true,
+    output: value["output"],
+    truncated: value["truncated"],
+    stats: value["stats"],
+  };
 }
 
 function parseFailedResponse(value: Record<string, unknown>): WorkerResponse | undefined {
@@ -55,14 +66,6 @@ function errorMessage(error: unknown): string {
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted === true) throw new Error("execution aborted");
-}
-
-function truncateUtf8(text: string, maxBytes: number): { text: string; truncated: boolean } {
-  const encoded = Buffer.from(text, "utf8");
-  if (encoded.byteLength <= maxBytes) return { text, truncated: false };
-  let end = maxBytes;
-  while (end > 0 && (encoded[end] ?? 0) >= 0x80 && (encoded[end] ?? 0) < 0xc0) end -= 1;
-  return { text: encoded.subarray(0, end).toString("utf8"), truncated: true };
 }
 
 function sandboxWorkerUrl(): URL {
@@ -168,7 +171,7 @@ export async function executeApprovedProgram(
       status: "completed",
       digest,
       output: output.text,
-      truncated: output.truncated,
+      truncated: response.truncated || output.truncated,
       stats: response.stats,
     };
   } catch (error) {

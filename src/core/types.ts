@@ -67,6 +67,7 @@ export type WorkerResponse =
   | {
       ok: true;
       output: string;
+      truncated: boolean;
       stats: ExecutionStats;
     }
   | {
