@@ -3,10 +3,11 @@ import {
   fstatSync,
   lstatSync,
   openSync,
+  opendirSync,
   readSync,
-  readdirSync,
   realpathSync,
   statSync,
+  type Dirent,
 } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
@@ -284,6 +285,20 @@ export class ReadOnlyCapabilityHost {
     return output;
   }
 
+  *#directoryEntries(path: string): Generator<Dirent, void> {
+    const directory = opendirSync(path);
+    try {
+      let entry = directory.readSync();
+      while (entry !== null) {
+        this.#scanEntry();
+        yield entry;
+        entry = directory.readSync();
+      }
+    } finally {
+      directory.closeSync();
+    }
+  }
+
   #resolveWalkEntry(
     realStart: string,
     name: string,
@@ -315,11 +330,7 @@ export class ReadOnlyCapabilityHost {
     if (this.#visitedDirectories.has(realStart)) return true;
     this.#visitedDirectories.add(realStart);
 
-    const entries = readdirSync(realStart, { withFileTypes: true }).sort((left, right) =>
-      left.name.localeCompare(right.name),
-    );
-    for (const entry of entries) {
-      this.#scanEntry();
+    for (const entry of this.#directoryEntries(realStart)) {
       const resolvedEntry = this.#resolveWalkEntry(realStart, entry.name);
       if (resolvedEntry === undefined) continue;
       const { absolute, kind, relPath } = resolvedEntry;
@@ -352,10 +363,7 @@ export class ReadOnlyCapabilityHost {
     const maxResults = this.#resultLimit(input);
     const entries: { name: string; type: string }[] = [];
 
-    for (const item of readdirSync(target.absolute, { withFileTypes: true }).sort((left, right) =>
-      left.name.localeCompare(right.name),
-    )) {
-      this.#scanEntry();
+    for (const item of this.#directoryEntries(target.absolute)) {
       const relPath = slashPath(relative(this.#root, resolve(target.absolute, item.name)));
       try {
         assertNotSensitive(relPath);
@@ -367,7 +375,7 @@ export class ReadOnlyCapabilityHost {
       entries.push({ name: item.name, type: entryType(resolve(target.absolute, item.name)) });
       if (entries.length >= maxResults) break;
     }
-    return entries;
+    return entries.sort((left, right) => left.name.localeCompare(right.name));
   }
 
   #find(input: Record<string, unknown>): unknown {
