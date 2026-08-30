@@ -165,15 +165,23 @@ text({ listed, found, matches, read });`);
     expect(parent.error).toContain("escapes");
   });
 
-  it("blocks sensitive paths and symlink escapes", async () => {
+  it("blocks sensitive paths, version-control metadata, and symlink escapes", async () => {
     writeFileSync(join(root, ".env"), "TOKEN=secret\n");
+    mkdirSync(join(root, ".git"));
+    writeFileSync(join(root, ".git", "config"), "credential-bearing URL\n");
     symlinkSync("/etc/hosts", join(root, "outside-link"));
 
     const sensitive = await run('text(await tools.read({ path: ".env" }));');
+    const gitConfig = await run('text(await tools.read({ path: ".git/config" }));');
+    const gitScan = await run('text(await tools.find({ path: ".git" }));');
     const escaped = await run('text(await tools.read({ path: "outside-link" }));');
 
     expect(sensitive).toMatchObject({ status: "failed" });
     expect(sensitive.error).toContain("sensitive path");
+    expect(gitConfig).toMatchObject({ status: "failed" });
+    expect(gitConfig.error).toContain("sensitive path");
+    expect(gitScan).toMatchObject({ status: "failed" });
+    expect(gitScan.error).toContain("sensitive path");
     expect(escaped).toMatchObject({ status: "failed" });
     expect(escaped.error).toContain("symlink escapes");
   });
