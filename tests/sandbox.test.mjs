@@ -194,6 +194,18 @@ text({ listed, found, matches, read });`);
     expect(Date.now() - started).toBeLessThan(3_000);
   });
 
+  it("stops directory enumeration at the listing limit", async () => {
+    for (let index = 0; index < 100; index += 1) {
+      writeFileSync(join(root, `entry-${String(index)}.txt`), "value\n");
+    }
+
+    const result = await run('text(await tools.ls({ path: ".", maxResults: 1 }));');
+
+    expect(result).toMatchObject({ status: "completed" });
+    expect(JSON.parse(result.output)).toHaveLength(1);
+    expect(result.stats.scannedEntries).toBe(1);
+  });
+
   it("stops recursive search at the result limit", async () => {
     mkdirSync(join(root, "one"));
     mkdirSync(join(root, "two"));

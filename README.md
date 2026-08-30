@@ -54,7 +54,7 @@ Use a small, non-sensitive working directory when testing a model. The approval 
 
 ## Limits
 
-Each execution uses a fresh QuickJS WebAssembly runtime in a new worker. The default limits cover source size, run time, memory, stack size, tool calls, file reads, recursive scans and final results. Output is bounded inside the worker before transfer to the parent process. Line offsets can scan past the first read-sized file prefix. The tool returns an explicit error if it cannot reach or return the requested range within its byte limits.
+Each execution uses a fresh QuickJS WebAssembly runtime in a new worker. The default limits cover source size, run time, memory, stack size, tool calls, file reads, recursive scans and final results. Output is bounded inside the worker before transfer to the parent process. Directory entries are read incrementally and stop at scan or result limits. Line offsets can scan past the first read-sized file prefix. The tool returns an explicit error if it cannot reach or return the requested range within its byte limits.
 
 The first release supports `read` and `grep` for text. It also supports `find` and `ls` for paths. It does not support shell commands, writes, edits, network requests, persistent cells, background work, or a `wait` tool.
 
