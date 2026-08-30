@@ -1,3 +1,4 @@
+export { escapeApprovalText } from "./core/approval-display.js";
 export { digestProgram } from "./core/approval.js";
 export { DEFAULT_SANDBOX_LIMITS, resolveLimits } from "./core/limits.js";
 export { CODE_MODE_SYSTEM_PROMPT, CODE_MODE_TOOL_DESCRIPTION } from "./core/prompt.js";

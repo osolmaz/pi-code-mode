@@ -48,13 +48,13 @@ npx pi-code-mode \
 
 The optional `--api-key-env` flag loads one named environment variable into an in-memory credential store for the run. The harness does not save that key.
 
-The harness prints each program between source markers and asks `Run this program? [y/N]`. It denies execution when standard input is not an interactive terminal. There is no approve-all option.
+The harness prints each program between source markers and asks `Run this program? [y/N]`. Approval prompts run one at a time. Control characters and backslashes appear as reversible escapes, so source text cannot use terminal controls to hide or replace the prompt. The harness denies execution when standard input is not an interactive terminal. There is no approve-all option.
 
 Use a small, non-sensitive working directory when testing a model. The approval gate and sandbox reduce risk, but the JavaScript engine is not an operating-system security boundary.
 
 ## Limits
 
-Each execution uses a fresh QuickJS WebAssembly runtime in a new worker. The default limits cover source size, run time, memory, stack size, tool calls, file reads, recursive scans and final results.
+Each execution uses a fresh QuickJS WebAssembly runtime in a new worker. The default limits cover source size, run time, memory, stack size, tool calls, file reads, recursive scans and final results. Line offsets can scan past the first read-sized file prefix. The tool returns an explicit error if it cannot reach or return the requested range within its byte limits.
 
 The first release supports `read` and `grep` for text. It also supports `find` and `ls` for paths. It does not support shell commands, writes, edits, network requests, persistent cells, background work, or a `wait` tool.
 

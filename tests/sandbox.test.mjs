@@ -41,6 +41,27 @@ text({ listed, found, matches, read });`);
     expect(result.stats.toolCalls).toBe(4);
   });
 
+  it("reads line ranges beyond the first read-sized prefix", async () => {
+    const lines = Array.from({ length: 70_010 }, (_, index) => `line-${String(index + 1)}`);
+    writeFileSync(join(root, "large.txt"), `${lines.join("\n")}\n`);
+
+    const result = await run(
+      'text(await tools.read({ path: "large.txt", offset: 70000, limit: 2 }));',
+    );
+    const limited = await run(
+      'text(await tools.read({ path: "large.txt", offset: 100, limit: 1 }));',
+      { limits: { maxScannedBytes: 64 } },
+    );
+
+    expect(result).toMatchObject({
+      status: "completed",
+      output: "line-70000\nline-70001",
+    });
+    expect(result.stats.scannedBytes).toBeGreaterThan(256 * 1024);
+    expect(limited).toMatchObject({ status: "failed" });
+    expect(limited.error).toContain("requested line range exceeds the scanned byte limit");
+  });
+
   it("does not expose Node or network globals", async () => {
     const result = await run(
       "text([typeof process, typeof require, typeof fetch, typeof console, typeof WebSocket]);",

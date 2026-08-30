@@ -4,7 +4,11 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { CODE_MODE_SYSTEM_PROMPT, createCodeModeResourceLoader } from "../src/index.ts";
+import {
+  CODE_MODE_SYSTEM_PROMPT,
+  createCodeModeResourceLoader,
+  escapeApprovalText,
+} from "../src/index.ts";
 
 let agentDir;
 let root;
@@ -17,6 +21,17 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
   rmSync(agentDir, { recursive: true, force: true });
+});
+
+describe("approval display", () => {
+  it("makes controls visible and distinguishes them from literal escapes", () => {
+    const rendered = escapeApprovalText(`\\\u001b\r\t\u202e\nplain`);
+
+    expect(rendered).toBe(
+      ["\\\\", "\\u{001b}", "\\u{000d}", "\\u{0009}", "\\u{202e}", "\nplain"].join(""),
+    );
+    expect(rendered).not.toContain("\u001b");
+  });
 });
 
 describe("SDK harness resource loader", () => {

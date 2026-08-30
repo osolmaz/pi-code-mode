@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import { escapeApprovalText } from "../core/approval-display.js";
 import { CODE_MODE_TOOL_DESCRIPTION } from "../core/prompt.js";
 import { executeApprovedProgram } from "../core/sandbox.js";
 import type { ApprovalCallback, SandboxLimits } from "../core/types.js";
@@ -32,6 +33,7 @@ function installCodeMode(pi: ExtensionAPI, options: CodeModeExtensionOptions): v
       },
       { additionalProperties: false },
     ),
+    executionMode: "sequential",
     async execute(_toolCallId, params, signal, _onUpdate, context) {
       const approve: ApprovalCallback =
         options.approve ??
@@ -39,7 +41,7 @@ function installCodeMode(pi: ExtensionAPI, options: CodeModeExtensionOptions): v
           if (!context.hasUI) return false;
           return context.ui.confirm(
             `Run Code Mode program ${request.digest.slice(0, 12)}?`,
-            `Working directory: ${request.rootDir}\n\n${request.code}`,
+            `Working directory: ${escapeApprovalText(request.rootDir)}\n\n${escapeApprovalText(request.code)}`,
           );
         });
       const result = await executeApprovedProgram({

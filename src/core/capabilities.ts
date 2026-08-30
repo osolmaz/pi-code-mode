@@ -130,6 +130,22 @@ function entryType(path: string): "directory" | "file" | "symlink" | "other" {
   return "other";
 }
 
+function countNewlines(buffer: Buffer): number {
+  let count = 0;
+  for (const byte of buffer) count += Number(byte === 10);
+  return count;
+}
+
+function shouldContinueLineScan(
+  position: number,
+  size: number,
+  budget: number,
+  newlineCount: number,
+  lastLine: number,
+): boolean {
+  return position < size && position < budget && newlineCount < lastLine;
+}
+
 export class ReadOnlyCapabilityHost {
   readonly #limits: SandboxLimits;
   readonly #root: string;
@@ -211,6 +227,59 @@ export class ReadOnlyCapabilityHost {
     }
   }
 
+  #scanLinePrefix(path: string, lastLine: number, budget: number): Buffer {
+    const descriptor = openSync(path, "r");
+    try {
+      const size = fstatSync(descriptor).size;
+      const chunks: Buffer[] = [];
+      let newlineCount = 0;
+      let position = 0;
+
+      while (shouldContinueLineScan(position, size, budget, newlineCount, lastLine)) {
+        const length = Math.min(64 * 1024, size - position, budget - position);
+        const buffer = Buffer.allocUnsafe(length);
+        const bytesRead = readSync(descriptor, buffer, 0, length, position);
+        if (bytesRead === 0) break;
+
+        const chunk = buffer.subarray(0, bytesRead);
+        chunks.push(chunk);
+        position += bytesRead;
+        this.#stats.scannedBytes += bytesRead;
+        if (chunk.includes(0)) throw new Error("binary files are not supported");
+        newlineCount += countNewlines(chunk);
+      }
+
+      if (position < size && newlineCount < lastLine) {
+        throw new Error(
+          `requested line range exceeds the scanned byte limit (${String(this.#limits.maxScannedBytes)})`,
+        );
+      }
+      return Buffer.concat(chunks);
+    } finally {
+      closeSync(descriptor);
+    }
+  }
+
+  #readLineRange(path: string, offset: number, limit: number): string {
+    const lastLine = offset + limit - 1;
+    if (!Number.isSafeInteger(lastLine)) throw new Error("requested line range is too large");
+
+    const remaining = this.#limits.maxScannedBytes - this.#stats.scannedBytes;
+    if (remaining <= 0)
+      throw new Error(`scanned byte limit exceeded (${String(this.#limits.maxScannedBytes)})`);
+
+    const allLines = this.#scanLinePrefix(path, lastLine, remaining)
+      .toString("utf8")
+      .split(/\r?\n/u);
+    const output = allLines.slice(offset - 1, lastLine).join("\n");
+    if (Buffer.byteLength(output, "utf8") > this.#limits.maxReadBytes) {
+      throw new Error(
+        `requested line range exceeds the read byte limit (${String(this.#limits.maxReadBytes)})`,
+      );
+    }
+    return output;
+  }
+
   #resolveWalkEntry(
     realStart: string,
     name: string,
@@ -270,12 +339,7 @@ export class ReadOnlyCapabilityHost {
 
     const offset = optionalInteger(input, "offset") ?? 1;
     const limit = optionalInteger(input, "limit") ?? 2_000;
-    const buffer = this.#readBytes(target.absolute, this.#limits.maxReadBytes);
-    if (buffer.includes(0)) throw new Error("binary files are not supported");
-
-    const allLines = buffer.toString("utf8").split(/\r?\n/u);
-    const lines = allLines.slice(offset - 1, offset - 1 + limit);
-    return lines.join("\n");
+    return this.#readLineRange(target.absolute, offset, limit);
   }
 
   #ls(input: Record<string, unknown>): unknown {

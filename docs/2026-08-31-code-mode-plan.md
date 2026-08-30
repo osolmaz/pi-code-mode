@@ -159,6 +159,8 @@ The extension, core, and harness shipped in one package as planned. The capabili
 
 The harness gained an optional `--api-key-env` flag. It reads one named environment variable into an in-memory credential store, then discards the credential when the process exits. It does not accept a key on the command line or save a key to Pi state.
 
+Approval calls are sequential. Dynamic approval text uses reversible escapes for terminal controls, Unicode formatting controls, and literal backslashes. This prevents concurrent prompts and source text from changing the terminal display. Line-based reads scan to offsets beyond the first read-sized prefix and return an explicit error when a requested range exceeds a scan or return limit.
+
 The worker-only capability and QuickJS modules are covered through integration tests because the coverage process does not collect counters from terminated worker threads. The parent sandbox, limits, prompt, and extension remain above the 85 percent coverage gate. Mutation testing covers the deterministic approval digest and limit validation modules and reached a 100 percent mutation score.
 
 ## Provider test result
