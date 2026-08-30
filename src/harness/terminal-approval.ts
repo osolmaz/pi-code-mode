@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline/promises";
 import { stdin, stderr } from "node:process";
 
+import { escapeApprovalText } from "../core/approval-display.js";
 import type { ApprovalCallback } from "../core/types.js";
 
 export type TerminalApprovalOptions = {
@@ -14,12 +15,13 @@ export function createTerminalApproval(options: TerminalApprovalOptions = {}): A
   return async (request) => {
     if (!input.isTTY || !output.isTTY) return false;
 
+    const displayedCode = escapeApprovalText(request.code);
     output.write(`\nCode Mode program ${request.digest.slice(0, 12)}\n`);
-    output.write(`Working directory: ${request.rootDir}\n`);
-    output.write("----- BEGIN EXACT SOURCE -----\n");
-    output.write(request.code);
-    if (!request.code.endsWith("\n")) output.write("\n");
-    output.write("----- END EXACT SOURCE -----\n");
+    output.write(`Working directory: ${escapeApprovalText(request.rootDir)}\n`);
+    output.write("----- BEGIN SOURCE (CONTROLS AND BACKSLASHES ESCAPED) -----\n");
+    output.write(displayedCode);
+    if (!displayedCode.endsWith("\n")) output.write("\n");
+    output.write("----- END SOURCE -----\n");
 
     const interface_ = createInterface({ input, output, terminal: true });
     try {

@@ -55,6 +55,7 @@ describe("Pi extension", () => {
     extension.events.get("before_agent_start")({}, context());
     extension.events.get("session_shutdown")({}, context());
 
+    expect(extension.tool.executionMode).toBe("sequential");
     expect(extension.activeChanges).toEqual([["exec"], ["exec"], ["read", "bash"]]);
   });
 
@@ -120,6 +121,24 @@ describe("Pi extension", () => {
 
     expect(confirm).toHaveBeenCalledOnce();
     expect(result.details.status).toBe("denied");
+  });
+
+  it("escapes terminal controls before showing an approved source", async () => {
+    const confirm = vi.fn(() => true);
+    const extension = loadExtension();
+    const code = `/* control: \u001b[2J\r\t\u202e */\ntext("safe");`;
+    const result = await extension.tool.execute(
+      "call-controlled-source",
+      { code },
+      undefined,
+      undefined,
+      context({ hasUI: true, ui: { confirm } }),
+    );
+
+    const displayedSource = confirm.mock.calls[0][1];
+    expect(displayedSource).toContain("\\u{001b}[2J\\u{000d}\\u{0009}\\u{202e}");
+    expect(displayedSource).not.toContain("\u001b");
+    expect(result).toMatchObject({ details: { status: "completed" } });
   });
 
   it("shows and runs the exact approved source", async () => {
