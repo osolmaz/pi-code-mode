@@ -167,17 +167,26 @@ text({ listed, found, matches, read });`);
 
   it("blocks sensitive paths, version-control metadata, and symlink escapes", async () => {
     writeFileSync(join(root, ".env"), "TOKEN=secret\n");
+    writeFileSync(join(root, ".envrc"), "export TOKEN=secret\n");
     mkdirSync(join(root, ".git"));
     writeFileSync(join(root, ".git", "config"), "credential-bearing URL\n");
     symlinkSync("/etc/hosts", join(root, "outside-link"));
 
     const sensitive = await run('text(await tools.read({ path: ".env" }));');
+    const direnv = await run('text(await tools.read({ path: ".envrc" }));');
+    const gcloud = await run(
+      'text(await tools.read({ path: "gcloud/application_default_credentials.json" }));',
+    );
     const gitConfig = await run('text(await tools.read({ path: ".git/config" }));');
     const gitScan = await run('text(await tools.find({ path: ".git" }));');
     const escaped = await run('text(await tools.read({ path: "outside-link" }));');
 
     expect(sensitive).toMatchObject({ status: "failed" });
     expect(sensitive.error).toContain("sensitive path");
+    expect(direnv).toMatchObject({ status: "failed" });
+    expect(direnv.error).toContain("sensitive path");
+    expect(gcloud).toMatchObject({ status: "failed" });
+    expect(gcloud.error).toContain("sensitive path");
     expect(gitConfig).toMatchObject({ status: "failed" });
     expect(gitConfig.error).toContain("sensitive path");
     expect(gitScan).toMatchObject({ status: "failed" });
