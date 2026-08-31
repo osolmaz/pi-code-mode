@@ -164,6 +164,24 @@ text({ listed, found, matches, read });`);
     expect(Date.now() - started).toBeLessThan(3_000);
   });
 
+  it("accumulates CPU use across asynchronous timer turns", async () => {
+    const result = await run(
+      `
+let turns = 0;
+function work() {
+  const deadline = Date.now() + 40;
+  while (Date.now() < deadline) {}
+  turns += 1;
+  if (turns < 10) setTimeout(work, 1);
+}
+setTimeout(work, 1);`,
+      { cpuLimitMs: 100 },
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("JavaScript CPU limit exceeded");
+  });
+
   it("bounds output at a UTF-8 boundary", async () => {
     const ascii = await run('text("x".repeat(5_000));', { maxOutputBytes: 128 });
     const unicode = await run('text("😀");', { maxOutputBytes: 3 });

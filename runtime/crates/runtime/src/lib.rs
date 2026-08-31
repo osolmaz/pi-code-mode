@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use deno_core::error::CoreError;
 use deno_core::v8;
@@ -65,7 +65,7 @@ pub struct RuntimeExecution {
     source: Option<String>,
     completion: Option<ProgramCompletion>,
     watchdog: CpuWatchdog,
-    cpu_limit: Duration,
+    cpu_remaining: Duration,
     memory_limit_hit: Arc<AtomicBool>,
     tool_calls: Arc<AtomicU32>,
     output: OutputBuffer,
@@ -134,7 +134,7 @@ impl RuntimeExecution {
             source: Some(config.source),
             completion: None,
             watchdog,
-            cpu_limit,
+            cpu_remaining: cpu_limit,
             memory_limit_hit,
             tool_calls,
             output: config.output,
@@ -161,11 +161,19 @@ impl RuntimeExecution {
         let source = self.source.take().ok_or_else(|| {
             RuntimeError::Initialization("program source is unavailable".to_owned())
         })?;
-        self.watchdog.arm(self.cpu_limit);
+        if self.cpu_remaining.is_zero() || self.watchdog.tripped() {
+            return Err(RuntimeError::CpuLimit);
+        }
+        self.watchdog.arm(self.cpu_remaining);
+        let started = Instant::now();
         let promise = self
             .runtime
             .execute_script("pi-code-mode:program", program_source(&source));
         self.watchdog.disarm();
+        self.cpu_remaining = self.cpu_remaining.saturating_sub(started.elapsed());
+        if self.cpu_remaining.is_zero() || self.watchdog.tripped() {
+            return Err(RuntimeError::CpuLimit);
+        }
         let promise = promise.map_err(|error| {
             classify_start_error(&self.watchdog, &self.memory_limit_hit, error.to_string())
         })?;
@@ -180,7 +188,7 @@ impl RuntimeExecution {
     fn classify_error(&self, message: String) -> RuntimeError {
         if self.memory_limit_hit.load(Ordering::Acquire) {
             RuntimeError::MemoryLimit
-        } else if self.watchdog.tripped() {
+        } else if self.watchdog.tripped() || self.cpu_remaining.is_zero() {
             RuntimeError::CpuLimit
         } else if message.contains("__PI_CODE_MODE_EXIT__") {
             RuntimeError::Execution("__PI_CODE_MODE_EXIT__".to_owned())
@@ -205,11 +213,19 @@ impl Future for RuntimeExecution {
             .as_mut()
             .expect("program completion must exist after startup");
 
-        this.watchdog.arm(this.cpu_limit);
+        if this.cpu_remaining.is_zero() || this.watchdog.tripped() {
+            return Poll::Ready(Err(RuntimeError::CpuLimit));
+        }
+        this.watchdog.arm(this.cpu_remaining);
+        let started = Instant::now();
         let event_loop = this
             .runtime
             .poll_event_loop(context, PollEventLoopOptions::default());
         this.watchdog.disarm();
+        this.cpu_remaining = this.cpu_remaining.saturating_sub(started.elapsed());
+        if this.cpu_remaining.is_zero() || this.watchdog.tripped() {
+            return Poll::Ready(Err(RuntimeError::CpuLimit));
+        }
 
         if let Poll::Ready(result) = event_loop {
             if let Err(error) = result {
