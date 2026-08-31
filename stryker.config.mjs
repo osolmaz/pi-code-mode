@@ -2,7 +2,7 @@ export default {
   checkers: ["typescript"],
   concurrency: 4,
   coverageAnalysis: "perTest",
-  mutate: ["src/core/approval.ts", "src/core/limits.ts"],
+  mutate: ["src/core/approval.ts", "src/core/limits.ts", "src/harness/config.ts"],
   reporters: ["clear-text", "progress"],
   testRunner: "vitest",
   thresholds: {

@@ -8,6 +8,7 @@ import {
   CODE_MODE_SYSTEM_PROMPT,
   createCodeModeResourceLoader,
   escapeApprovalText,
+  runCodeModePromptLoop,
 } from "../src/index.ts";
 
 let agentDir;
@@ -31,6 +32,25 @@ describe("approval display", () => {
       ["\\\\", "\\u{001b}", "\\u{000d}", "\\u{0009}", "\\u{202e}", "\nplain"].join(""),
     );
     expect(rendered).not.toContain("\u001b");
+  });
+});
+
+describe("interactive prompt loop", () => {
+  it("keeps one session active across non-empty prompts and stops on EOF", async () => {
+    const prompts = ["first", "   ", "second", undefined];
+    const submitted = [];
+    let turns = 0;
+
+    await runCodeModePromptLoop({
+      nextPrompt: async () => prompts.shift(),
+      submitPrompt: async (prompt) => submitted.push(prompt),
+      onTurnEnd: () => {
+        turns += 1;
+      },
+    });
+
+    expect(submitted).toEqual(["first", "second"]);
+    expect(turns).toBe(2);
   });
 });
 
