@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
-import { stderr, stdin, stdout } from "node:process";
-import { createInterface } from "node:readline";
 import { resolve } from "node:path";
+import { stderr, stdin, stdout } from "node:process";
 
 import {
   getCodeModeConfigPath,
@@ -10,8 +9,7 @@ import {
   saveCodeModeConfig,
   type CodeModeConfig,
 } from "./config.js";
-import { runCodeModePrompt, runCodeModeRepl } from "./index.js";
-import { createTerminalApproval } from "./terminal-approval.js";
+import { runCodeModeInteractive } from "./index.js";
 
 type CliArguments = {
   config: CodeModeConfig;
@@ -24,17 +22,18 @@ type CliArguments = {
 
 const HELP = `Usage: pi-code-mode [options] [prompt]
 
-Runs Pi with only the approved Code Mode exec tool. With no prompt, starts an interactive in-memory session.
+Runs Pi's standard interactive TUI with only the approved Code Mode exec tool.
+A prompt argument becomes the initial message.
 
 Options:
   --provider <provider>    Override the configured Pi provider
   --model <model>          Override the configured model
   --api-key-env <name>     Read the provider credential from this environment variable
-  --cwd <directory>        Set the read-only sandbox root (default: current directory)
+  --cwd <directory>        Set the initial read-only sandbox root (default: current directory)
   --save-config            Save the effective provider, model, and API-key variable name
   -h, --help               Show this help
 
-The user config is stored under the XDG config directory. It never stores an API key. CLI options override saved values. Type /exit or /quit to leave interactive mode.`;
+The user config is stored under the XDG config directory. It never stores an API key. CLI options override saved values. Use Pi's standard controls to work with or leave the session.`;
 
 function takeValue(args: string[], index: number, flag: string): string {
   const value = args[index + 1];
@@ -110,8 +109,9 @@ function requiredConfigValue(
   configPath: string,
 ): string {
   const selected = explicit ?? saved;
-  if (selected === undefined)
+  if (selected === undefined) {
     throw new Error(`${flag} is required or must be set in ${configPath}`);
+  }
   return selected;
 }
 
@@ -144,11 +144,15 @@ function finalizeArguments(state: CliState): CliArguments {
 }
 
 function parseArguments(args: string[]): CliArguments {
-  const state: CliState = { cwd: process.cwd(), promptParts: [], saveConfig: false };
+  const state: CliState = {
+    cwd: process.cwd(),
+    promptParts: [],
+    saveConfig: false,
+  };
   let index = 0;
   while (index < args.length) {
     const argument = args[index];
-    if (argument === undefined) throw new Error("invalid empty argument");
+    if (argument === undefined) break;
     if (argument === "--") {
       state.promptParts.push(...args.slice(index + 1));
       break;
@@ -166,75 +170,22 @@ function parseArguments(args: string[]): CliArguments {
   return finalizeArguments(state);
 }
 
-function readTerminalPrompt(): Promise<string | undefined> {
-  return new Promise((resolvePrompt) => {
-    const interface_ = createInterface({ input: stdin, output: stderr, terminal: true });
-    let settled = false;
-    const finish = (value: string | undefined): void => {
-      if (settled) return;
-      settled = true;
-      interface_.close();
-      resolvePrompt(value);
-    };
-    interface_.once("close", () => {
-      finish(undefined);
-    });
-    interface_.once("SIGINT", () => {
-      finish(undefined);
-    });
-    interface_.question("code-mode> ", (answer) => {
-      const command = answer.trim().toLocaleLowerCase();
-      finish(command === "/exit" || command === "/quit" ? undefined : answer);
-    });
-  });
-}
-
-async function runInteractive(args: CliArguments): Promise<void> {
-  if (!stdin.isTTY || !stderr.isTTY) throw new Error("interactive mode requires a terminal");
-  stderr.write(
-    `Pi Code Mode\nModel: ${args.config.provider}/${args.config.model}\nRoot: ${args.cwd}\nType /exit or /quit to leave.\n\n`,
-  );
-  await runCodeModeRepl({
-    provider: args.config.provider,
-    model: args.config.model,
-    cwd: args.cwd,
-    approve: createTerminalApproval(),
-    nextPrompt: readTerminalPrompt,
-    onText: (text) => {
-      stdout.write(text);
-    },
-    onTurnEnd: () => {
-      stdout.write("\n");
-    },
-    onWarning: (warning) => {
-      stderr.write(`Warning: ${warning}\n`);
-    },
-    ...(args.apiKey === undefined ? {} : { apiKey: args.apiKey }),
-  });
-}
-
 async function main(): Promise<void> {
   const args = parseArguments(process.argv.slice(2));
   if (args.saveConfig) {
     saveCodeModeConfig(args.config, args.configPath);
     stderr.write(`Saved config: ${args.configPath}\n`);
   }
-  if (args.prompt === undefined) {
-    await runInteractive(args);
-    return;
+  if (!stdin.isTTY || !stdout.isTTY) {
+    throw new Error("interactive mode requires a terminal");
   }
-  await runCodeModePrompt({
+  await runCodeModeInteractive({
     provider: args.config.provider,
     model: args.config.model,
     cwd: args.cwd,
-    prompt: args.prompt,
-    approve: createTerminalApproval(),
-    onText: (text) => {
-      stdout.write(text);
-    },
     ...(args.apiKey === undefined ? {} : { apiKey: args.apiKey }),
+    ...(args.prompt === undefined ? {} : { initialMessage: args.prompt }),
   });
-  stdout.write("\n");
 }
 
 void main().catch((error: unknown) => {

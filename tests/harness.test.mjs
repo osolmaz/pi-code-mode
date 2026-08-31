@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CODE_MODE_SYSTEM_PROMPT,
   createCodeModeResourceLoader,
+  createCodeModeRuntime,
   escapeApprovalText,
-  runCodeModePromptLoop,
 } from "../src/index.ts";
 
 let agentDir;
@@ -35,22 +35,31 @@ describe("approval display", () => {
   });
 });
 
-describe("interactive prompt loop", () => {
-  it("keeps one session active across non-empty prompts and stops on EOF", async () => {
-    const prompts = ["first", "   ", "second", undefined];
-    const submitted = [];
-    let turns = 0;
-
-    await runCodeModePromptLoop({
-      nextPrompt: async () => prompts.shift(),
-      submitPrompt: async (prompt) => submitted.push(prompt),
-      onTurnEnd: () => {
-        turns += 1;
-      },
+describe("standard Pi runtime", () => {
+  it("uses the Code Mode agent directory and only exposes exec", async () => {
+    const runtime = await createCodeModeRuntime({
+      provider: "openai",
+      model: "gpt-5.4",
+      cwd: root,
+      agentDir,
+      approve: () => false,
     });
 
-    expect(submitted).toEqual(["first", "second"]);
-    expect(turns).toBe(2);
+    try {
+      expect(runtime.services.agentDir).toBe(agentDir);
+      expect(runtime.services.resourceLoader.getExtensions().errors).toEqual([]);
+      expect(runtime.services.resourceLoader.getExtensions().extensions).toHaveLength(1);
+      expect(runtime.services.resourceLoader.getSkills()).toEqual({ skills: [], diagnostics: [] });
+      expect(runtime.services.resourceLoader.getPrompts()).toEqual({
+        prompts: [],
+        diagnostics: [],
+      });
+      expect(runtime.services.resourceLoader.getAgentsFiles()).toEqual({ agentsFiles: [] });
+      expect(runtime.services.resourceLoader.getSystemPrompt()).toBe(CODE_MODE_SYSTEM_PROMPT);
+      expect(runtime.session.agent.state.tools.map((tool) => tool.name)).toEqual(["exec"]);
+    } finally {
+      await runtime.dispose();
+    }
   });
 });
 

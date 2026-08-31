@@ -29,6 +29,7 @@
   "scripts": {
     "clean": "rm -rf coverage dist",
     "build": "tsc --project tsconfig.build.json",
+    "postbuild": "node --input-type=module -e \"import { chmodSync } from 'node:fs'; chmodSync('dist/harness/cli.js', 0o755)\"",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "lint": "eslint . --config eslint.config.mjs",

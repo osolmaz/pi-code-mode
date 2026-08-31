@@ -8,7 +8,7 @@ date: 2026-08-31
 
 Pi Code Mode will let a model inspect a working tree through one `exec` tool. The model will write a small JavaScript program that can compose read-only file tools. A person must see and approve the exact program before it runs.
 
-The project will also include a separate command-line harness built with Pi's `createAgentSession()` factory. The extension and harness will use the same tool description, approval contract, sandbox, limits, and read-only capabilities.
+The project also includes a separate command-line harness built with Pi's public session runtime factory and `InteractiveMode`. The extension and harness use the same tool description, approval contract, sandbox, limits, and read-only capabilities.
 
 ## Requirements
 
@@ -22,7 +22,7 @@ The project will also include a separate command-line harness built with Pi's `c
 - Run each program in a fresh JavaScript isolate with no Node.js globals, shell, network, environment variables, module loader, or write API.
 - Restrict file access to the active working directory and deny symlink escapes and common credential files.
 - Put strict limits on source size, run time, memory, tool calls, scanned data, and output.
-- Include a standalone Pi SDK harness with no discovered extensions, skills, prompt templates, context files, persistent sessions, or unrelated tools.
+- Include a standalone Pi SDK harness that uses the standard Pi TUI, keeps its state separate from normal Pi, and loads no discovered extensions, skills, prompt templates, context files, or unrelated tools.
 - Test the result with the requested DeepSeek model through Hugging Face Inference Providers. Use a harmless fixture directory and review every generated program before approval.
 
 ## Assumptions
@@ -56,11 +56,11 @@ The default approval callback will use Pi's documented TUI confirmation dialog. 
 
 ### SDK harness
 
-The harness will use `ModelRuntime`, `resolveCliModel()`, `DefaultResourceLoader`, `SessionManager.inMemory()`, `SettingsManager.inMemory()`, and `createAgentSession()`.
+The standalone harness uses `ModelRuntime`, `resolveCliModel()`, `createAgentSessionRuntime()`, `createAgentSessionServices()`, `createAgentSessionFromServices()`, and `InteractiveMode`. A smaller programmatic helper remains available for one-shot SDK calls through an in-memory `createAgentSession()`.
 
-Resource discovery will be disabled. The loader will receive only the Code Mode extension factory and a small Code Mode system prompt. The harness will use the user's existing Pi authentication files in place. It will not copy or print credentials.
+Resource discovery is disabled. The loader receives only the Code Mode extension factory and a small Code Mode system prompt. The executable reads an explicitly named API-key environment variable into an in-memory credential store. It does not copy, print, or persist credentials.
 
-The terminal approval prompt will print the exact source between clear markers and require an explicit `y` answer. Non-interactive input will deny the call. There will be no approve-all option.
+The standard Pi confirmation dialog shows the exact source and requires an explicit decision. Non-interactive calls are denied. There is no approve-all option.
 
 ## Security limits
 
@@ -97,8 +97,8 @@ src/
     tool.ts
   harness/
     cli.ts
+    config.ts
     index.ts
-    terminal-approval.ts
 tests/
 fixtures/
 docs/
@@ -109,9 +109,9 @@ One npm package will contain the extension and harness. This keeps installation 
 ## Contract impact
 
 - **Session state:** Normal Pi tool-call and tool-result entries will be appended. The extension will not add custom entries.
-- **Other persistent data:** None. The SDK harness will use an in-memory session and settings store.
+- **Other persistent data:** The standalone executable stores nonsecret configuration, Pi settings, and session history under its own XDG configuration directory. It does not use normal Pi state.
 - **Pi internals:** None.
-- **Public Pi API:** `registerTool`, `setActiveTools`, `getActiveTools`, `session_start`, `before_agent_start`, `session_shutdown`, `ctx.hasUI`, and `ctx.ui.confirm`; plus the public SDK factories and resource loader options.
+- **Public Pi API:** `registerTool`, `setActiveTools`, `getActiveTools`, `session_start`, `before_agent_start`, `session_shutdown`, `ctx.hasUI`, and `ctx.ui.confirm`; plus `createAgentSessionRuntime`, `createAgentSessionServices`, `createAgentSessionFromServices`, `InteractiveMode`, and public resource loader options.
 
 ## Non-goals
 
@@ -134,7 +134,7 @@ One npm package will contain the extension and harness. This keeps installation 
 5. Programs cannot access Node.js globals, the network, modules, the shell, writes, paths outside the root, blocked credential paths, or symlink escapes.
 6. Infinite loops, excessive output, excessive scans, and excessive tool calls stop within their limits.
 7. Extension reload and shutdown restore the prior tool list.
-8. The SDK harness has no discovered resources, persistent session, or extra model-visible tools.
+8. The SDK harness opens the standard Pi TUI, keeps its settings and sessions in its own agent directory, and has no discovered resources or extra model-visible tools.
 9. Package build, formatting, lint, type checks, unit tests, coverage, Slophammer, SimpleDoc, and package-content checks pass.
 10. DeepSeek completes harmless fixture tasks through `exec`, and every executed program has an observed approval decision.
 
@@ -171,6 +171,6 @@ The model refused a request for an absolute path before it called `exec`. A sepa
 
 ## Persistent standalone configuration
 
-The standalone executable now reads a per-user JSON config from the XDG config directory. The model has three stable fields: required `provider` and `model` strings and an optional `apiKeyEnv` string. The last field stores only an environment-variable name. API key values, working directories, and sessions are never persisted. CLI options override the saved fields, and `--save-config` writes the effective values with private directory and file permissions.
+The standalone executable reads a per-user JSON config from the XDG config directory. The model has three stable fields: required `provider` and `model` strings and an optional `apiKeyEnv` string. The last field stores only an environment-variable name. API key values are never persisted. CLI options override the saved fields, and `--save-config` writes the effective values with private directory and file permissions.
 
-Running `pi-code-mode` without a prompt starts a small interactive loop over one in-memory Pi session. Each turn still uses the same sequential approval callback and isolated worker contract. `/exit`, `/quit`, Ctrl+C, and end-of-file leave the loop. Passing a prompt keeps the original one-shot behavior.
+Running `pi-code-mode` creates an `AgentSessionRuntime` with Pi's public factory APIs and opens the standard `InteractiveMode` TUI. The runtime keeps Pi settings and session history in the Code Mode configuration directory. It disables discovered extensions, skills, prompt templates, and project context files, but leaves the standard TUI and themes available. The model receives only `exec`. Approval uses Pi's confirmation UI. A positional prompt is the initial TUI message rather than a separate one-shot mode.

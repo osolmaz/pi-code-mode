@@ -15,9 +15,13 @@ export { createCodeModeExtension } from "./extension/index.js";
 export {
   createCodeModeHarness,
   createCodeModeResourceLoader,
+  createCodeModeRuntime,
+  runCodeModeInteractive,
   runCodeModePrompt,
-  runCodeModePromptLoop,
-  runCodeModeRepl,
+} from "./harness/index.js";
+export type {
+  CreateCodeModeRuntimeOptions,
+  RunCodeModeInteractiveOptions,
 } from "./harness/index.js";
 export {
   getCodeModeConfigPath,
