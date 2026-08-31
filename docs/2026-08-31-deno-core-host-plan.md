@@ -15,7 +15,9 @@ Replace the current QuickJS implementation in `pi-code-mode` with a production C
 The final system will:
 
 - keep Pi’s normal interactive window;
-- expose only `exec` and `wait` to the model;
+- expose only OpenAI-shaped `exec` and `wait` tools to the model;
+- send raw JavaScript through OpenAI freeform grammar tools when the selected provider advertises that capability;
+- avoid production checks for specific model names, including GPT-5.6 aliases;
 - accept arbitrary JavaScript within a strict capability boundary;
 - let JavaScript compose parent-owned tools through `tools`;
 - support sequential, conditional, parallel, and repeated tool calls;
@@ -40,6 +42,7 @@ pi-code-mode/
 ├── TypeScript Pi package
 │   ├── extension
 │   ├── standalone Pi Factory harness
+│   ├── OpenAI tool-contract adapter
 │   ├── host client
 │   ├── tool broker
 │   └── executable installer/resolver
@@ -100,6 +103,137 @@ V8 promise resolves
 The host process will never execute shell commands, read project files, access credentials, or make network requests by itself.
 
 Generated JavaScript can request those operations only through the parent-side tool broker.
+
+---
+
+## OpenAI model contract
+
+Pi Code Mode will be an OpenAI-shaped implementation. This means the model-facing tools and prompt will follow the current public Codex Code Mode behavior, while the host protocol and runtime remain independent.
+
+The production implementation will not contain checks for GPT-5.6, Luna, Terra, Sol, or any other model name. Model names change. The stable contract is the tool format that the selected provider can send.
+
+### Boundary
+
+The system has three separate contracts:
+
+1. The OpenAI adapter defines what the model sees.
+2. The Pi extension normalizes model tool calls into internal TypeScript requests.
+3. The Rust host executes normalized requests without knowing the provider, API, or model.
+
+```text
+OpenAI Responses model
+  |
+  | freeform exec or function wait
+  v
+OpenAI contract adapter
+  |
+  | normalized TypeScript request
+  v
+Pi Code Mode extension
+  |
+  | versioned host protocol
+  v
+Rust V8 host
+```
+
+No OpenAI request headers, response item types, model identifiers, credentials, or transport state will enter the Rust host protocol.
+
+### `exec` as an OpenAI freeform tool
+
+The model must see `exec` as a freeform custom tool whose input is raw JavaScript source. It must not see a JSON object or a quoted `code` string.
+
+The grammar will match the Codex source contract:
+
+```lark
+start: pragma_source | plain_source
+pragma_source: PRAGMA_LINE NEWLINE SOURCE
+plain_source: SOURCE
+
+PRAGMA_LINE: /[ \t]*\/\/ @exec:[^\r\n]*/
+NEWLINE: /\r?\n/
+SOURCE: /[\s\S]+/
+```
+
+Pi custom tools execute with parsed parameter objects. The extension will therefore register an internal schema with one required string property named `code` and attach Pi's documented grammar `constrainedSampling` metadata. On a compatible OpenAI Responses provider, Pi serializes that tool as a freeform custom tool and maps its raw input back to the internal `code` property.
+
+This translation is an adapter detail. The host receives only normalized source and execution options.
+
+The extension will not silently fall back to a normal JSON function tool for `exec`. A JSON fallback changes the action format presented to the model and is not the same compatibility target.
+
+### `wait` as an OpenAI function tool
+
+The model must see `wait` as a normal, non-strict function tool with this input:
+
+```typescript
+type OpenAIWaitInput = {
+  cell_id: string;
+  yield_time_ms?: number;
+  max_tokens?: number;
+  terminate?: boolean;
+};
+```
+
+The default `yield_time_ms` will be 10,000. The default `max_tokens` will be 10,000. The extension will normalize these snake-case fields into its internal cell request.
+
+The host will continue to enforce byte limits for security. The OpenAI adapter can accept token-shaped output options for contract compatibility, but it must not report invented token counts. If an exact tokenizer is unavailable, it will enforce the hard byte cap and describe any model-visible token truncation as approximate.
+
+### `exec` pragma
+
+The first line can set model-facing execution options:
+
+```js
+// @exec: {"yield_time_ms": 10000, "max_output_tokens": 1000}
+```
+
+The extension will parse the pragma before it sends the source to the host. It will validate both values, remove no other source text, and pass normalized limits separately. Invalid pragma JSON or out-of-range values will fail before execution.
+
+Explicit pragma values take precedence over defaults. They cannot exceed the package's hard security limits.
+
+### Activation
+
+Code Mode activation will require both:
+
+- an explicit Pi Code Mode setting or standalone harness mode;
+- a selected OpenAI Responses-family provider that advertises grammar custom-tool support through Pi's documented model compatibility metadata.
+
+Activation will not use a model-name allowlist.
+
+If the provider cannot represent freeform `exec`, Code Mode will fail before the model request. It will not expose the old tools, use a JSON-shaped substitute, or guess from the provider name.
+
+### Public OpenAI Responses first
+
+The first release will use Pi's documented OpenAI Responses grammar-tool path. It will not replace the complete OpenAI provider when Pi can already serialize the required custom tool.
+
+Codex Responses Lite uses a separate internal request envelope, header, replay format, and namespace representation. That transport will not be part of the first core implementation. If it becomes necessary, it must be a separate adapter registered through Pi's public provider API. The host, broker, and model tool definitions must remain unchanged.
+
+Likewise, `tool_namespaces_info` is transport metadata rather than a runtime requirement. A later adapter can derive it from the frozen catalog when a documented or verified endpoint requires it. The core will not depend on it.
+
+### Replay and session conversion
+
+Pi session history will retain normal Pi tool call and result entries. The OpenAI adapter must preserve the distinction between:
+
+- freeform `custom_tool_call` and `custom_tool_call_output` for `exec`;
+- function calls and function outputs for `wait`;
+- the internal `{ code }` representation used by Pi;
+- the raw JavaScript representation sent to OpenAI.
+
+Tests must cover initial calls, streaming partial source, replay, branching, compaction, provider changes, and deterministic call identifiers. A retry must not duplicate a completed nested side effect.
+
+### Independence
+
+Pi Code Mode will use Codex and `pi-codex-conversion` as behavioral references only.
+
+The package will not:
+
+- vendor Codex source;
+- import `pi-codex-conversion`;
+- launch a Codex binary or Codex Code Mode host;
+- use Codex's private Rust protocol;
+- copy the Responses Lite provider implementation into the core;
+- require a specific OpenAI model name;
+- expose unrelated Codex conversion features.
+
+The repository will own its TypeScript adapter, prompt, host protocol, Rust runtime, broker, tests, installer, and release artifacts.
 
 ---
 
@@ -590,6 +724,13 @@ src/
 │   ├── result.ts
 │   └── types.ts
 │
+├── provider/
+│   ├── capabilities.ts
+│   ├── exec-grammar.ts
+│   ├── openai-contract.ts
+│   ├── replay.ts
+│   └── tool-codec.ts
+│
 ├── host/
 │   ├── assets.ts
 │   ├── binary.ts
@@ -798,7 +939,6 @@ declare const tools: Readonly<Record<string, ToolFunction>>;
 declare const ALL_TOOLS: ReadonlyArray<ToolMetadata>;
 
 declare function text(value: unknown): void;
-declare function json(value: unknown): void;
 declare function notify(value: unknown): void;
 declare function yield_control(reason?: string): Promise<void>;
 declare function setTimeout(
@@ -893,24 +1033,30 @@ A collision will fail catalog creation. It will not select a winner by accident.
 
 ---
 
-## Large tool catalogs
+## Deferred tools and `ALL_TOOLS`
 
-Small catalogs can be described directly in the `exec` tool description.
+Small catalogs can describe all promoted tools directly in the `exec` tool description.
 
-Large catalogs will use a lazy catalog API.
+Large catalogs will follow the Codex pattern:
 
-```typescript
-declare const catalog: {
-  search(query: string, limit?: number): Promise<ToolMetadata[]>;
-  describe(name: string): Promise<ToolDescription>;
-};
+- every allowed tool remains installed on `tools`;
+- promoted tools receive compact TypeScript declarations in the `exec` description;
+- deferred tools receive no full startup declaration;
+- `ALL_TOOLS` lists bounded `name` and `description` metadata for deferred discovery;
+- generated code filters `ALL_TOOLS` and then calls the selected method on `tools`.
+
+Example:
+
+```js
+const matches = ALL_TOOLS.filter(({ name, description }) =>
+  name.includes("search") || description.includes("search")
+);
+text(matches);
 ```
 
-`catalog.search()` and `catalog.describe()` will be internal host operations. They will not count as provider tool calls.
+The first release will not add an OpenClaw-style `catalog.search()` runtime API. It is not part of the Codex guest contract and would add another host operation.
 
-The catalog returned to the model will contain bounded descriptions. Full JSON schemas will be loaded only when needed.
-
-The implementation will use deterministic sorting so the same catalog creates the same prompt and tool names.
+The implementation will use deterministic sorting so the same frozen tool set creates the same declarations and tool names. Complete input schemas can remain in the parent broker and generated declarations; they do not need to enter model context for deferred tools.
 
 ---
 
@@ -921,9 +1067,13 @@ The TypeScript broker will define:
 ```typescript
 type CodeModeToolDescriptor = {
   name: string;
+  codeModeName: string;
   description: string;
+  usage?: string;
+  kind: "function" | "freeform";
   inputSchema?: unknown;
   outputSchema?: unknown;
+  deferred?: boolean;
   effect: "read" | "write" | "execute" | "network" | "interactive";
   replay: "safe" | "unsafe";
   directOnly?: boolean;
@@ -1076,7 +1226,7 @@ One tool failure will reject only that tool promise unless the JavaScript progra
 - append output in call order;
 - enforce a cumulative byte limit.
 
-`json(value)` will require JSON-compatible data and preserve its structured form.
+`text(value)` will be the only general model-output helper in the first release. Structured values will be serialized by `text()` according to the documented Codex-shaped contract.
 
 `notify(value)` will publish an intermediate bounded output event.
 
@@ -1092,19 +1242,21 @@ Program completed with no output.
 
 ## `exec` interface
 
-The generic Pi extension must use an object schema:
+The OpenAI model-facing input is raw JavaScript source. It is sent as a freeform custom-tool call, not as JSON.
+
+Pi's internal tool callback uses this normalized representation:
 
 ```typescript
-type ExecInput = {
+type InternalExecInput = {
   code: string;
-  yieldTimeMs?: number;
-  maxOutputBytes?: number;
 };
 ```
 
-The provider adapter can use freeform JavaScript when a documented provider API supports it.
+Execution options come from the optional first-line `// @exec:` pragma and package hard limits. They are not additional model-facing JSON fields.
 
-The host protocol will not depend on either representation.
+The OpenAI adapter maps raw source to `InternalExecInput.code`. The host protocol receives source, normalized yield time, and normalized output limits. It does not know whether the original provider call was freeform or structured.
+
+If the selected provider cannot serialize the freeform grammar tool, the extension reports that OpenAI Code Mode transport is unavailable. It does not use a function-tool fallback.
 
 ### Execution flow
 
@@ -1149,16 +1301,18 @@ type ExecResult =
 
 ## `wait` interface
 
+The OpenAI model-facing function input is:
+
 ```typescript
 type WaitInput = {
-  cellId: string;
-  yieldTimeMs?: number;
-  maxOutputBytes?: number;
+  cell_id: string;
+  yield_time_ms?: number;
+  max_tokens?: number;
   terminate?: boolean;
 };
 ```
 
-`wait` will not accept JavaScript source.
+The extension will normalize these fields to internal camel-case names. `cell_id` is required. Unknown fields are rejected. `wait` will not accept JavaScript source.
 
 It will observe the existing cell.
 
@@ -1168,7 +1322,7 @@ If the cell completes during the wait period, `wait` returns `completed`.
 
 If it fails, `wait` returns `failed`.
 
-If it remains active, `wait` returns `waiting` with the same `cellId`.
+If it remains active, `wait` returns `waiting` with the same `cell_id` in its model-visible result.
 
 If `terminate` is true, the host terminates the isolate and returns `terminated`.
 
@@ -1626,8 +1780,10 @@ No secret input or full output will be added to trace metadata.
 
 The extension will register:
 
-- `exec`;
-- `wait`.
+- `exec` with the one-string internal schema and OpenAI Lark grammar `constrainedSampling` metadata;
+- `wait` as the documented OpenAI-shaped function tool.
+
+Before activation, it will verify that the selected OpenAI Responses-family model configuration advertises grammar custom-tool support. This is a capability check, not a model-name check.
 
 On session start, it will save the previous active tool names and activate only:
 
@@ -1684,7 +1840,11 @@ Pi’s documented `getAllTools()` returns metadata, but it does not return execu
 
 Therefore, a drop-in extension cannot safely wrap and invoke every arbitrary installed Pi tool through public API alone.
 
-The implementation will follow this boundary.
+Pi does expose documented grammar-tool metadata through `constrainedSampling`, and OpenAI Responses model definitions can advertise `supportsOpenAIGrammarTools`. The extension will use those public contracts for raw `exec` calls. It will not patch provider payloads when the stock provider path is sufficient.
+
+A complete provider override through `pi.registerProvider()` is allowed only for a separately scoped transport adapter. The first release will not override OpenAI account handling, authentication, retry behavior, or unrelated request fields.
+
+The implementation will follow these boundaries.
 
 ### Extension mode
 
@@ -1719,20 +1879,24 @@ The project will not use Pi internals to simulate this API.
 
 ## Prompt contract
 
-The system prompt will state:
+The model-facing `exec` description will state:
 
-- the model has `exec` and `wait`;
-- `exec.code` contains JavaScript;
-- available capabilities are on `tools`;
+- input is raw JavaScript source, not JSON, a quoted string, or a Markdown fence;
+- source runs as an asynchronous module in a fresh restricted V8 isolate;
+- available capabilities are methods on `tools`;
 - tool calls must be awaited;
 - intermediate values stay in the program;
-- `text()` or `json()` produces output;
-- `wait` applies only to a returned cell ID;
-- direct filesystem, shell, network, module, and environment access is unavailable;
-- credential requests are forbidden;
+- `text()` produces output;
+- a first-line `// @exec:` pragma can set bounded yield and output options;
+- `wait` applies only to a returned `cell_id`;
+- direct filesystem, shell, network, module, environment, Node, and Deno access is unavailable;
 - loops and retries must remain bounded.
 
-The prompt will not claim that JavaScript can access a capability that the broker did not provide.
+The description will include deterministic TypeScript declarations for promoted nested tools and bounded discovery guidance for deferred tools in `ALL_TOOLS`.
+
+The package will keep one canonical OpenAI tool-description fixture. Tests will fail when the public `exec` or `wait` contract changes unintentionally.
+
+The prompt will not mention GPT-5.6 or claim that JavaScript can access a capability that the broker did not provide.
 
 ---
 
@@ -1882,7 +2046,7 @@ Runtime tests will prove:
 - parallel calls work;
 - caught tool errors work;
 - uncaught tool errors fail the cell;
-- `text()` and `json()` preserve order;
+- repeated `text()` calls preserve order;
 - bare values do not become output;
 - session store survives between cells;
 - isolate globals do not survive between cells;
@@ -1996,6 +2160,27 @@ The parent process must remain healthy.
 
 ---
 
+## OpenAI contract tests
+
+Provider-contract tests will verify:
+
+- `exec` is serialized as a custom freeform tool with the canonical Lark grammar;
+- `exec` has no model-visible JSON parameter schema;
+- raw streamed `exec` source maps to the internal `code` property;
+- `wait` remains a function tool with `cell_id`, `yield_time_ms`, `max_tokens`, and `terminate`;
+- only `exec` and `wait` are sent in the active model tool list;
+- incompatible providers fail before the request instead of receiving a JSON-shaped substitute;
+- replay emits `custom_tool_call` and `custom_tool_call_output` for `exec`;
+- replay emits function call and function output items for `wait`;
+- branching and compaction preserve source and call identity;
+- switching providers either converts history correctly or fails before sending an invalid request;
+- activation behavior is unchanged when test model names change;
+- production source contains no model alias allowlist.
+
+Fixtures will be authored for this package's contract. They will not import fixtures or source from Codex or `pi-codex-conversion`.
+
+---
+
 ## Integration tests with Pi
 
 Integration tests will start Pi with the built extension or Factory harness and verify:
@@ -2017,6 +2202,8 @@ Integration tests will start Pi with the built extension or Factory harness and 
 ## Model compatibility suite
 
 A fixed test suite will measure whether a model can use the interface.
+
+Model identifiers belong only in test configuration and result records. Production activation logic will not read this matrix. The initial external matrix can include the requested GPT-5.6 models, but adding or removing a test model must require no package code change.
 
 Tasks will include:
 
@@ -2134,6 +2321,10 @@ Deliver:
 
 - architecture record;
 - threat model;
+- exact OpenAI freeform `exec` grammar;
+- exact OpenAI `wait` function schema;
+- provider capability and activation rules without model-name checks;
+- replay conversion rules for custom and function tool calls;
 - protocol version 1 schema;
 - cell state machine;
 - error taxonomy;
@@ -2172,7 +2363,7 @@ Deliver:
 - `deno_core` runtime crate;
 - V8 startup;
 - main module evaluation;
-- `text()` and `json()`;
+- `text()`;
 - no module loader;
 - CPU, memory, source, and output limits.
 
@@ -2225,21 +2416,27 @@ Exit criteria:
 - expired cells are removed;
 - no VM snapshots are used.
 
-### Phase 6: Integrate the Pi extension
+### Phase 6: Integrate the OpenAI contract and Pi extension
 
 Deliver:
 
-- `exec`;
-- `wait`;
+- raw-source `exec` through Pi's grammar `constrainedSampling` contract;
+- structured `wait` with `cell_id`, `yield_time_ms`, `max_tokens`, and `terminate`;
+- provider capability checks without model-name checks;
+- custom-tool and function-tool replay conversion tests;
 - active tool enforcement;
-- prompt updates;
+- canonical OpenAI-shaped prompt and tool-description fixtures;
 - nested trace rendering;
 - session lifecycle;
 - shutdown cleanup.
 
 Exit criteria:
 
+- a compatible OpenAI Responses provider receives freeform `exec` and function `wait`;
+- an incompatible provider fails before a model turn without restoring broad tools;
 - standard Pi exposes only `exec` and `wait`;
+- no production source contains GPT model aliases for activation;
+- replay preserves raw `exec` source and correct output item types;
 - reload is safe;
 - no private Pi API is used;
 - extension mode retains its documented nested-tool limit.
@@ -2322,34 +2519,46 @@ Exit criteria:
 The implementation is complete only when all these conditions hold:
 
 1. The model sees only `exec` and `wait`.
-2. `exec` can run arbitrary bounded JavaScript.
-3. JavaScript has no direct host capabilities.
-4. Nested tools run only through the parent broker.
-5. The broker enforces a frozen tool catalog.
-6. Tool schemas are checked before execution.
-7. Parallel tool calls return to the correct promises.
-8. Intermediate results can remain inside V8.
-9. Output is explicit and bounded.
-10. A long cell can yield and complete through `wait`.
-11. `wait` never reruns source.
-12. A cancelled or expired cell cannot revive.
-13. V8 failure cannot crash the Pi process.
-14. Infinite loops stop.
-15. Memory bombs stop.
-16. Oversized frames stop.
-17. Host unavailability fails visibly.
-18. No QuickJS fallback exists.
-19. No source approval prompt exists.
-20. Nested action policy remains active.
-21. Credentials never enter the host process.
-22. The extension uses documented Pi APIs only.
-23. The standalone executable remains a regular Pi TUI.
-24. Cross-platform artifacts are pinned and verified.
-25. Complete TypeScript and Rust checks pass.
+2. A compatible OpenAI Responses provider sees `exec` as a raw-source custom tool with the canonical Lark grammar.
+3. The model sees `wait` as a function tool with the canonical snake-case fields.
+4. Production activation uses provider capabilities and contains no model-name allowlist.
+5. `exec` can run arbitrary bounded JavaScript.
+6. JavaScript has no direct host capabilities.
+7. Nested tools run only through the parent broker.
+8. The broker enforces a frozen tool catalog.
+9. Tool schemas are checked before execution.
+10. Parallel tool calls return to the correct promises.
+11. Intermediate results can remain inside V8.
+12. Output is explicit and bounded.
+13. A long cell can yield and complete through `wait`.
+14. `wait` never reruns source.
+15. A cancelled or expired cell cannot revive.
+16. V8 failure cannot crash the Pi process.
+17. Infinite loops stop.
+18. Memory bombs stop.
+19. Oversized frames stop.
+20. Host unavailability fails visibly.
+21. No QuickJS fallback exists.
+22. No JSON function fallback replaces freeform `exec`.
+23. No source approval prompt exists.
+24. Nested action policy remains active.
+25. Credentials never enter the host process.
+26. OpenAI request and authentication state never enter the host protocol.
+27. The extension uses documented Pi APIs only.
+28. The package does not depend on Codex or `pi-codex-conversion` at runtime.
+29. The standalone executable remains a regular Pi TUI.
+30. Cross-platform artifacts are pinned and verified.
+31. Complete TypeScript and Rust checks pass.
 
 ---
 
 ## Known blockers
+
+### OpenAI freeform tool transport
+
+Exact Code Mode activation requires a Pi provider path that advertises OpenAI grammar custom-tool support.
+
+If the selected provider cannot preserve raw `exec` input and custom-tool replay, the extension must stop before the model turn. Provider-name matching or a JSON function fallback is not acceptable.
 
 ### Arbitrary Pi tools
 
@@ -2397,6 +2606,10 @@ The first production release will not include:
 - direct filesystem access;
 - direct subprocess access;
 - environment access;
+- GPT model-name activation rules;
+- Codex Responses Lite transport in the first release;
+- vendored Codex or `pi-codex-conversion` source;
+- Notebook Mode, voice, web, image generation, or compaction replacement;
 - a compatibility mode for the old runtime;
 - private Pi API integration;
 - automatic wrapping of arbitrary third-party Pi tools;
@@ -2410,6 +2623,6 @@ The first production release will not include:
 
 The target implementation is:
 
-> A TypeScript Pi extension and Factory harness that communicate with a versioned Rust `deno_core` host process. Each program runs in a fresh, capability-free V8 isolate. Nested tools execute only in the TypeScript parent through a frozen broker. Yielded cells remain live and are observed through `wait`. The runtime uses strict process, isolate, tool, output, and lifecycle limits. The current QuickJS implementation is removed without a compatibility path.
+> A self-contained TypeScript Pi extension and Factory harness with an OpenAI-shaped model surface and a versioned Rust `deno_core` host process. Compatible OpenAI Responses providers receive raw-source `exec` and structured `wait`; production activation uses provider capabilities rather than model names. Each program runs in a fresh, capability-free V8 isolate. Nested tools execute only in the TypeScript parent through a frozen broker. Yielded cells remain live and are observed through `wait`. The runtime uses strict process, isolate, tool, output, and lifecycle limits. The current QuickJS implementation is removed without a compatibility path.
 
-This design accepts the cost of Rust and V8 in exchange for JavaScript compatibility, a mature asynchronous host bridge, clean process isolation, and a runtime that does not depend on another agent harness.
+This design accepts the cost of Rust and V8 in exchange for JavaScript compatibility, a mature asynchronous host bridge, clean process isolation, and a runtime that does not depend on Codex, `pi-codex-conversion`, or another agent harness.
