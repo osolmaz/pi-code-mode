@@ -9,7 +9,9 @@ export default defineConfig({
       reporter: ["text", "json-summary"],
       include: ["src/**/*.ts"],
       exclude: [
-        "src/harness/**",
+        "src/harness/cli.ts",
+        "src/harness/index.ts",
+        "src/harness/terminal-approval.ts",
         "src/core/capabilities.ts",
         "src/core/sandbox-worker.ts",
         "src/core/types.ts",

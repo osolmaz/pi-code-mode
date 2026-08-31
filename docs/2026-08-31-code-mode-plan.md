@@ -161,10 +161,16 @@ The harness gained an optional `--api-key-env` flag. It reads one named environm
 
 Approval calls are sequential. Dynamic approval text uses reversible escapes for terminal controls, Unicode formatting controls, and literal backslashes. This prevents concurrent prompts and source text from changing the terminal display. Line-based reads scan to offsets beyond the first read-sized prefix and return an explicit error when a requested range exceeds a scan or return limit. The QuickJS accumulator enforces the output limit before it returns data to the worker parent, and the parent applies the limit again as a defense. Directory scans use incremental enumeration, so listing, entry, and result limits apply before a directory can be fully materialized.
 
-The worker-only capability and QuickJS modules are covered through integration tests because the coverage process does not collect counters from terminated worker threads. The parent sandbox, limits, prompt, and extension remain above the 85 percent coverage gate. Mutation testing covers the deterministic approval digest and limit validation modules and reached a 100 percent mutation score.
+The worker-only capability and QuickJS modules are covered through integration tests because the coverage process does not collect counters from terminated worker threads. The parent sandbox, limits, prompt, and extension remain above the 85 percent coverage gate. Mutation testing covers the deterministic approval digest, limit validation, and user-config modules.
 
 ## Provider test result
 
 The test used `deepseek-ai/DeepSeek-V4-Flash-0731` through Hugging Face's automatic Inference Providers route. The model generated a single safe program that found and read two fixture files, counted their words, sorted the keys, and returned the correct counts. The exact source was approved in the terminal before execution.
 
 The model refused a request for an absolute path before it called `exec`. A separate listing task exercised denial behavior. Two changed programs were shown and denied, no program ran, and the model stopped after the second denial. The same Herdr tab also loaded the built extension through Pi's `-e` option with extension, skill, prompt-template, theme, and context-file discovery disabled.
+
+## Persistent standalone configuration
+
+The standalone executable now reads a per-user JSON config from the XDG config directory. The model has three stable fields: required `provider` and `model` strings and an optional `apiKeyEnv` string. The last field stores only an environment-variable name. API key values, working directories, and sessions are never persisted. CLI options override the saved fields, and `--save-config` writes the effective values with private directory and file permissions.
+
+Running `pi-code-mode` without a prompt starts a small interactive loop over one in-memory Pi session. Each turn still uses the same sequential approval callback and isolated worker contract. `/exit`, `/quit`, Ctrl+C, and end-of-file leave the loop. Passing a prompt keeps the original one-shot behavior.

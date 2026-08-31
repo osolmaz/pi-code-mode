@@ -16,4 +16,13 @@ export {
   createCodeModeHarness,
   createCodeModeResourceLoader,
   runCodeModePrompt,
+  runCodeModePromptLoop,
+  runCodeModeRepl,
 } from "./harness/index.js";
+export {
+  getCodeModeConfigPath,
+  loadCodeModeConfig,
+  parseCodeModeConfig,
+  saveCodeModeConfig,
+} from "./harness/config.js";
+export type { CodeModeConfig } from "./harness/config.js";

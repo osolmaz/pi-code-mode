@@ -33,20 +33,43 @@ text({ files, matches });
 
 The sandbox has no Node.js globals, shell, network, environment variables, module loader, or write functions. File tools stay inside the current working directory and reject common credential paths.
 
-## Use the SDK harness
+## Use the standalone harness
 
-The separate harness creates an in-memory Pi session with resource discovery disabled and `exec` as its only tool:
+Install the standalone executable from GitHub without enabling the extension in every Pi session:
 
 ```sh
-npx pi-code-mode \
-  --provider <provider> \
-  --model <model> \
-  --api-key-env <variable> \
-  --cwd ./safe-fixture \
-  "Count the lines in every text file and report the total."
+npm install --global git+https://github.com/osolmaz/pi-code-mode.git
 ```
 
-The optional `--api-key-env` flag loads one named environment variable into an in-memory credential store for the run. The harness does not save that key.
+The harness creates an in-memory Pi session with resource discovery disabled and `exec` as its only tool. Save its nonsecret user configuration on the first run:
+
+```sh
+export OPENAI_API_KEY=<key>
+pi-code-mode \
+  --provider openai \
+  --model gpt-5.4 \
+  --api-key-env OPENAI_API_KEY \
+  --save-config
+```
+
+With no prompt argument, `pi-code-mode` starts an interactive session. Type prompts at `code-mode>` and use `/exit` or `/quit` to leave. The same model session stays active until the process exits. The working directory is the read-only sandbox root and is not saved.
+
+Later runs use the saved provider, model, and API-key environment-variable name:
+
+```sh
+export OPENAI_API_KEY=<key>
+cd ./safe-fixture
+pi-code-mode
+```
+
+The config is at `$XDG_CONFIG_HOME/pi-code-mode/config.json`, or `~/.config/pi-code-mode/config.json` when `XDG_CONFIG_HOME` is not set. It stores only `provider`, `model`, and the optional `apiKeyEnv` name. It never stores the key or session history. Command-line options override saved values.
+
+Pass a prompt argument for one-shot use:
+
+```sh
+pi-code-mode --cwd ./safe-fixture \
+  "Count the lines in every text file and report the total."
+```
 
 The harness prints each program between source markers and asks `Run this program? [y/N]`. Approval prompts run one at a time. Control characters and backslashes appear as reversible escapes, so source text cannot use terminal controls to hide or replace the prompt. The harness denies execution when standard input is not an interactive terminal. There is no approve-all option.
 

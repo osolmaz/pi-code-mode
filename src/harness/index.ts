@@ -119,6 +119,14 @@ export async function createCodeModeHarness(
   };
 }
 
+function subscribeToSessionText(session: AgentSession, onText: (text: string) => void): () => void {
+  return session.subscribe((event) => {
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      onText(event.assistantMessageEvent.delta);
+    }
+  });
+}
+
 export type RunCodeModePromptOptions = CreateCodeModeHarnessOptions & {
   prompt: string;
   onText?: (text: string) => void;
@@ -127,16 +135,56 @@ export type RunCodeModePromptOptions = CreateCodeModeHarnessOptions & {
 export async function runCodeModePrompt(options: RunCodeModePromptOptions): Promise<string> {
   const harness = await createCodeModeHarness(options);
   let output = "";
-  const unsubscribe = harness.session.subscribe((event) => {
-    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-      output += event.assistantMessageEvent.delta;
-      options.onText?.(event.assistantMessageEvent.delta);
-    }
+  const unsubscribe = subscribeToSessionText(harness.session, (text) => {
+    output += text;
+    options.onText?.(text);
   });
 
   try {
     await harness.session.prompt(options.prompt);
     return output;
+  } finally {
+    unsubscribe();
+    harness.dispose();
+  }
+}
+
+export type CodeModePromptLoopOptions = {
+  nextPrompt: () => Promise<string | undefined>;
+  submitPrompt: (prompt: string) => Promise<void>;
+  onTurnEnd?: () => void;
+};
+
+export async function runCodeModePromptLoop(options: CodeModePromptLoopOptions): Promise<void> {
+  for (
+    let prompt = await options.nextPrompt();
+    prompt !== undefined;
+    prompt = await options.nextPrompt()
+  ) {
+    if (prompt.trim().length === 0) continue;
+    await options.submitPrompt(prompt);
+    options.onTurnEnd?.();
+  }
+}
+
+export type RunCodeModeReplOptions = CreateCodeModeHarnessOptions & {
+  nextPrompt: () => Promise<string | undefined>;
+  onText?: (text: string) => void;
+  onTurnEnd?: () => void;
+  onWarning?: (warning: string) => void;
+};
+
+export async function runCodeModeRepl(options: RunCodeModeReplOptions): Promise<void> {
+  const harness = await createCodeModeHarness(options);
+  const unsubscribe = subscribeToSessionText(harness.session, (text) => options.onText?.(text));
+  if (harness.warning !== undefined) options.onWarning?.(harness.warning);
+
+  try {
+    await runCodeModePromptLoop({
+      nextPrompt: options.nextPrompt,
+      submitPrompt: (prompt) => harness.session.prompt(prompt),
+      ...(options.onTurnEnd === undefined ? {} : { onTurnEnd: options.onTurnEnd }),
+    });
   } finally {
     unsubscribe();
     harness.dispose();
