@@ -1,9 +1,20 @@
+import { dirname, join } from "node:path";
+
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentSession,
+  AgentSessionRuntime,
+  AgentSessionRuntimeDiagnostic,
+  CreateAgentSessionRuntimeFactory,
+} from "@earendil-works/pi-coding-agent";
 import {
   createAgentSession,
+  createAgentSessionFromServices,
+  createAgentSessionRuntime,
+  createAgentSessionServices,
   DefaultResourceLoader,
   getAgentDir,
+  InteractiveMode,
   ModelRuntime,
   resolveCliModel,
   SessionManager,
@@ -13,6 +24,7 @@ import {
 import { CODE_MODE_SYSTEM_PROMPT } from "../core/prompt.js";
 import type { ApprovalCallback, SandboxLimits } from "../core/types.js";
 import { createCodeModeExtension } from "../extension/index.js";
+import { getCodeModeConfigPath } from "./config.js";
 
 export type CreateCodeModeHarnessOptions = {
   provider: string;
@@ -65,19 +77,16 @@ export async function createCodeModeResourceLoader(
   return resourceLoader;
 }
 
-async function createHarnessModelRuntime(
-  options: CreateCodeModeHarnessOptions,
-): Promise<ModelRuntime> {
-  if (options.apiKey === undefined) return ModelRuntime.create();
+async function createModelRuntime(provider: string, apiKey?: string): Promise<ModelRuntime> {
   const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore() });
-  await modelRuntime.setRuntimeApiKey(options.provider, options.apiKey);
+  if (apiKey !== undefined) await modelRuntime.setRuntimeApiKey(provider, apiKey);
   return modelRuntime;
 }
 
 export async function createCodeModeHarness(
   options: CreateCodeModeHarnessOptions,
 ): Promise<CodeModeHarness> {
-  const modelRuntime = await createHarnessModelRuntime(options);
+  const modelRuntime = await createModelRuntime(options.provider, options.apiKey);
   const resolved = resolveCliModel({
     cliProvider: options.provider,
     cliModel: options.model,
@@ -149,44 +158,104 @@ export async function runCodeModePrompt(options: RunCodeModePromptOptions): Prom
   }
 }
 
-export type CodeModePromptLoopOptions = {
-  nextPrompt: () => Promise<string | undefined>;
-  submitPrompt: (prompt: string) => Promise<void>;
-  onTurnEnd?: () => void;
+export type CreateCodeModeRuntimeOptions = {
+  provider: string;
+  model: string;
+  cwd: string;
+  agentDir?: string;
+  approve?: ApprovalCallback;
+  apiKey?: string;
+  limits?: Partial<SandboxLimits>;
 };
 
-export async function runCodeModePromptLoop(options: CodeModePromptLoopOptions): Promise<void> {
-  for (
-    let prompt = await options.nextPrompt();
-    prompt !== undefined;
-    prompt = await options.nextPrompt()
-  ) {
-    if (prompt.trim().length === 0) continue;
-    await options.submitPrompt(prompt);
-    options.onTurnEnd?.();
-  }
+export async function createCodeModeRuntime(
+  options: CreateCodeModeRuntimeOptions,
+): Promise<AgentSessionRuntime> {
+  const agentDir = options.agentDir ?? dirname(getCodeModeConfigPath());
+  const modelRuntime = await createModelRuntime(options.provider, options.apiKey);
+  const extension = createCodeModeExtension({
+    ...(options.approve === undefined ? {} : { approve: options.approve }),
+    ...(options.limits === undefined ? {} : { limits: options.limits }),
+  });
+
+  const createRuntime: CreateAgentSessionRuntimeFactory = async ({
+    cwd,
+    agentDir: runtimeAgentDir,
+    sessionManager,
+    sessionStartEvent,
+  }) => {
+    const settingsManager = SettingsManager.create(cwd, runtimeAgentDir, {
+      projectTrusted: false,
+    });
+    const services = await createAgentSessionServices({
+      cwd,
+      agentDir: runtimeAgentDir,
+      settingsManager,
+      modelRuntime,
+      resourceLoaderOptions: {
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noContextFiles: true,
+        systemPrompt: CODE_MODE_SYSTEM_PROMPT,
+        extensionFactories: [extension],
+      },
+    });
+    const resolved = resolveCliModel({
+      cliProvider: options.provider,
+      cliModel: options.model,
+      modelRuntime,
+    });
+    if (resolved.error !== undefined || resolved.model === undefined) {
+      throw new Error(resolved.error ?? `model not found: ${options.provider}/${options.model}`);
+    }
+
+    const diagnostics: AgentSessionRuntimeDiagnostic[] = [
+      ...services.diagnostics,
+      ...services.resourceLoader.getExtensions().errors.map(({ path, error }) => ({
+        type: "error" as const,
+        message: `Failed to load extension "${path}": ${error}`,
+      })),
+    ];
+    if (resolved.warning !== undefined) {
+      diagnostics.push({ type: "warning", message: resolved.warning });
+    }
+
+    return {
+      ...(await createAgentSessionFromServices({
+        services,
+        sessionManager,
+        ...(sessionStartEvent === undefined ? {} : { sessionStartEvent }),
+        model: resolved.model,
+        thinkingLevel: resolved.thinkingLevel ?? "off",
+        tools: ["exec"],
+      })),
+      services,
+      diagnostics,
+    };
+  };
+
+  return createAgentSessionRuntime(createRuntime, {
+    cwd: options.cwd,
+    agentDir,
+    sessionManager: SessionManager.create(options.cwd, join(agentDir, "sessions")),
+  });
 }
 
-export type RunCodeModeReplOptions = CreateCodeModeHarnessOptions & {
-  nextPrompt: () => Promise<string | undefined>;
-  onText?: (text: string) => void;
-  onTurnEnd?: () => void;
-  onWarning?: (warning: string) => void;
+export type RunCodeModeInteractiveOptions = CreateCodeModeRuntimeOptions & {
+  initialMessage?: string;
 };
 
-export async function runCodeModeRepl(options: RunCodeModeReplOptions): Promise<void> {
-  const harness = await createCodeModeHarness(options);
-  const unsubscribe = subscribeToSessionText(harness.session, (text) => options.onText?.(text));
-  if (harness.warning !== undefined) options.onWarning?.(harness.warning);
-
-  try {
-    await runCodeModePromptLoop({
-      nextPrompt: options.nextPrompt,
-      submitPrompt: (prompt) => harness.session.prompt(prompt),
-      ...(options.onTurnEnd === undefined ? {} : { onTurnEnd: options.onTurnEnd }),
-    });
-  } finally {
-    unsubscribe();
-    harness.dispose();
-  }
+export async function runCodeModeInteractive(
+  options: RunCodeModeInteractiveOptions,
+): Promise<void> {
+  const runtime = await createCodeModeRuntime(options);
+  const interactiveMode = new InteractiveMode(runtime, {
+    startupDiagnostics: [...runtime.diagnostics],
+    ...(runtime.modelFallbackMessage === undefined
+      ? {}
+      : { modelFallbackMessage: runtime.modelFallbackMessage }),
+    ...(options.initialMessage === undefined ? {} : { initialMessage: options.initialMessage }),
+  });
+  await interactiveMode.run();
 }
