@@ -1,17 +1,22 @@
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use deno_core::{OpState, op2};
+use deno_core::{CancelFuture, CancelHandle, OpState, op2};
 use deno_error::JsErrorBox;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use crate::output::OutputBuffer;
 use crate::store::SessionStore;
 use crate::types::{RuntimeLimits, SharedToolInvoker, ToolInvocation, YieldRequest};
+
+pub(crate) struct TimerEntry {
+    cancel: Rc<CancelHandle>,
+    delay: Duration,
+}
 
 pub struct RuntimeState {
     pub allowed_tools: Arc<HashSet<String>>,
@@ -22,7 +27,7 @@ pub struct RuntimeState {
     pub tool_calls: Arc<AtomicU32>,
     pub total_tool_result_bytes: Arc<AtomicUsize>,
     pub next_call_id: Arc<AtomicU64>,
-    pub active_timers: Arc<AtomicU32>,
+    pub(crate) timers: Rc<RefCell<HashMap<u32, TimerEntry>>>,
     pub tool_slots: Arc<Semaphore>,
     pub yield_tx: mpsc::UnboundedSender<YieldRequest>,
 }
@@ -109,10 +114,10 @@ fn op_store(
     #[string] key: String,
     #[serde] value: serde_json::Value,
 ) -> Result<(), JsErrorBox> {
-    state
-        .borrow::<RuntimeState>()
+    let runtime = state.borrow::<RuntimeState>();
+    runtime
         .store
-        .put(key, value)
+        .put(key, value, runtime.limits.max_store_bytes)
         .map_err(JsErrorBox::generic)
 }
 
@@ -146,31 +151,68 @@ fn op_exit() -> Result<(), JsErrorBox> {
     Err(JsErrorBox::generic("__PI_CODE_MODE_EXIT__"))
 }
 
-#[op2]
-async fn op_sleep(state: Rc<RefCell<OpState>>, delay_ms: f64) -> Result<(), JsErrorBox> {
-    let (active, limits) = {
-        let state = state.borrow();
-        let runtime = state.borrow::<RuntimeState>();
-        (Arc::clone(&runtime.active_timers), runtime.limits.clone())
-    };
+#[op2(fast)]
+fn op_timer_start(state: &mut OpState, id: u32, delay_ms: f64) -> Result<(), JsErrorBox> {
+    let runtime = state.borrow::<RuntimeState>();
     if !delay_ms.is_finite() {
         return Err(JsErrorBox::generic("timer delay must be finite"));
     }
     let delay_ms = delay_ms.max(0.0).round();
-    let maximum_delay_ms = Duration::from_millis(limits.max_timer_ms).as_secs_f64() * 1000.0;
+    let maximum_delay_ms =
+        Duration::from_millis(runtime.limits.max_timer_ms).as_secs_f64() * 1000.0;
     if delay_ms > maximum_delay_ms {
         return Err(JsErrorBox::generic(
             "timer delay exceeds the configured limit",
         ));
     }
-    let count = active.fetch_add(1, Ordering::AcqRel).saturating_add(1);
-    if count > limits.max_timers {
-        active.fetch_sub(1, Ordering::AcqRel);
+    let mut timers = runtime.timers.borrow_mut();
+    if timers.len() >= runtime.limits.max_timers as usize {
         return Err(JsErrorBox::generic("active timer limit exceeded"));
     }
-    tokio::time::sleep(Duration::from_secs_f64(delay_ms / 1000.0)).await;
-    active.fetch_sub(1, Ordering::AcqRel);
+    if timers.contains_key(&id) {
+        return Err(JsErrorBox::generic("timer id is already active"));
+    }
+    timers.insert(
+        id,
+        TimerEntry {
+            cancel: CancelHandle::new_rc(),
+            delay: Duration::from_secs_f64(delay_ms / 1000.0),
+        },
+    );
     Ok(())
+}
+
+#[op2]
+async fn op_sleep(state: Rc<RefCell<OpState>>, id: u32) -> bool {
+    let timers = {
+        let state = state.borrow();
+        Rc::clone(&state.borrow::<RuntimeState>().timers)
+    };
+    let Some((cancel, delay)) = timers
+        .borrow()
+        .get(&id)
+        .map(|entry| (Rc::clone(&entry.cancel), entry.delay))
+    else {
+        return false;
+    };
+    let completed = tokio::time::sleep(delay).or_cancel(cancel).await.is_ok();
+    timers.borrow_mut().remove(&id);
+    completed
+}
+
+#[op2(fast)]
+fn op_timer_cancel(state: &mut OpState, id: u32) -> bool {
+    let timer = state
+        .borrow::<RuntimeState>()
+        .timers
+        .borrow_mut()
+        .remove(&id);
+    if let Some(timer) = timer {
+        timer.cancel.cancel();
+        true
+    } else {
+        false
+    }
 }
 
 deno_core::extension!(
@@ -183,6 +225,8 @@ deno_core::extension!(
         op_load,
         op_yield_control,
         op_exit,
+        op_timer_start,
         op_sleep,
+        op_timer_cancel,
     ],
 );

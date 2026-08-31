@@ -18,7 +18,7 @@ impl SessionStore {
         }
     }
 
-    pub fn put(&self, key: String, value: Value) -> Result<(), String> {
+    pub fn put(&self, key: String, value: Value, execution_max_bytes: usize) -> Result<(), String> {
         if key.is_empty() || key.len() > 256 {
             return Err("store key must contain 1 to 256 bytes".to_owned());
         }
@@ -27,7 +27,7 @@ impl SessionStore {
         let size = serde_json::to_vec(&*values)
             .map_err(|error| format!("store value is not JSON-safe: {error}"))?
             .len();
-        if size > self.max_bytes {
+        if size > self.max_bytes.min(execution_max_bytes) {
             if let Some(old) = old {
                 values.insert(key, old);
             } else {
@@ -53,7 +53,14 @@ mod tests {
     #[test]
     fn rejects_values_over_the_total_limit() {
         let store = SessionStore::new(8);
-        assert!(store.put("long".to_owned(), json!("value")).is_err());
+        assert!(store.put("long".to_owned(), json!("value"), 8).is_err());
+        assert_eq!(store.get("long").expect("read store"), json!(null));
+    }
+
+    #[test]
+    fn applies_the_execution_limit_below_the_session_limit() {
+        let store = SessionStore::new(1_024);
+        assert!(store.put("long".to_owned(), json!("value"), 8).is_err());
         assert_eq!(store.get("long").expect("read store"), json!(null));
     }
 }

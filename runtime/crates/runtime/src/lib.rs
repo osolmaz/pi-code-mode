@@ -5,9 +5,11 @@ mod store;
 mod types;
 mod watchdog;
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
@@ -112,7 +114,7 @@ impl RuntimeExecution {
             tool_calls: Arc::clone(&tool_calls),
             total_tool_result_bytes: Arc::new(AtomicUsize::new(0)),
             next_call_id: Arc::new(AtomicU64::new(1)),
-            active_timers: Arc::new(AtomicU32::new(0)),
+            timers: Rc::new(RefCell::new(HashMap::new())),
             tool_slots: Arc::new(Semaphore::new(
                 config.limits.max_concurrent_tool_calls as usize,
             )),

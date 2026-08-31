@@ -65,6 +65,9 @@ impl OutputBuffer {
         if truncated {
             inner.truncated = true;
         }
+        if value.is_empty() {
+            return;
+        }
         let output = if notification {
             RuntimeOutput::Notification { message: value }
         } else {
@@ -139,5 +142,18 @@ mod tests {
             snapshot.items.as_slice(),
             [RuntimeOutput::Text { text }] if text == "é"
         ));
+    }
+
+    #[test]
+    fn skips_outputs_that_cannot_fit_one_code_point() {
+        let output = OutputBuffer::new(1);
+        for _ in 0..1_000 {
+            output.text("😀".to_owned());
+            output.text(String::new());
+        }
+        let snapshot = output.snapshot(0, 100);
+        assert!(snapshot.truncated);
+        assert!(snapshot.items.is_empty());
+        assert_eq!(snapshot.total_bytes, 0);
     }
 }

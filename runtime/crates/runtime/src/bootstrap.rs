@@ -63,14 +63,17 @@ pub fn bootstrap_source(tools: &[RuntimeTool]) -> Result<String, serde_json::Err
   define("setTimeout", Object.freeze((callback, delay = 0, ...args) => {{
     if (typeof callback !== "function") throw new TypeError("callback must be a function");
     const id = nextTimer++;
+    ops.op_timer_start(id, delay);
     activeTimers.set(id, true);
-    ops.op_sleep(delay).then(() => {{
-      if (!activeTimers.delete(id)) return;
+    ops.op_sleep(id).then((completed) => {{
+      if (!completed || !activeTimers.delete(id)) return;
       callback(...args);
     }});
     return id;
   }}));
-  define("clearTimeout", Object.freeze((id) => {{ activeTimers.delete(id); }}));
+  define("clearTimeout", Object.freeze((id) => {{
+    if (activeTimers.delete(id)) ops.op_timer_cancel(id);
+  }}));
 
   for (const name of ["console", "WebAssembly", "SharedArrayBuffer", "Atomics", "Deno"]) {{
     Reflect.deleteProperty(globalThis, name);
