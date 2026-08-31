@@ -1,7 +1,7 @@
 {
   "name": "pi-code-mode",
   "version": "0.1.0",
-  "description": "Run model-written JavaScript through one approved, read-only Pi tool.",
+  "description": "Run model-written JavaScript through one read-only Pi tool.",
   "type": "module",
   "license": "MIT",
   "repository": {

@@ -1,7 +1,7 @@
 # Pi Code Mode
 
 Pi Code Mode is a read-only Code Mode extension and SDK harness for the Pi coding agent.
-It gives the model one `exec` tool for composing file reads in a sandboxed JavaScript program, then asks a person to approve the exact program before it runs.
+It gives the model one `exec` tool for composing file reads in a sandboxed JavaScript program. The program runs automatically when the model calls the tool.
 
 ## Install
 
@@ -21,7 +21,7 @@ Start Pi in the directory that the model may inspect:
 pi
 ```
 
-The model can call only `exec`. Each call shows its full JavaScript source. Select **Yes** only after you have checked the source.
+The model can call only `exec`. Each call runs automatically in the sandbox.
 
 Programs can use these read-only functions:
 
@@ -52,7 +52,7 @@ pi-code-mode \
   --save-config
 ```
 
-With no prompt argument, `pi-code-mode` opens a regular Pi window. Pi's editor, transcript, selectors, slash commands, session controls, themes, and keyboard controls work as usual. The Code Mode approval request appears as a Pi confirmation dialog that shows the exact JavaScript source.
+With no prompt argument, `pi-code-mode` opens a regular Pi window. Pi's editor, transcript, selectors, slash commands, session controls, themes, and keyboard controls work as usual. Code Mode programs run automatically when the model calls `exec`.
 
 Later runs use the saved provider, model, and API-key environment-variable name:
 
@@ -73,9 +73,9 @@ pi-code-mode --cwd ./safe-fixture \
   "Count the lines in every text file and report the total."
 ```
 
-Approval requests run one at a time. Control characters and backslashes appear as reversible escapes, so source text cannot use terminal controls to hide or replace the request. The executable requires an interactive terminal. There is no approve-all option.
+The executable requires an interactive terminal.
 
-Use a small, non-sensitive working directory when testing a model. The approval gate and sandbox reduce risk, but the JavaScript engine is not an operating-system security boundary.
+Use a small, non-sensitive working directory when testing a model. Model-written programs run without an approval prompt. The sandbox limits their capabilities, but the JavaScript engine is not an operating-system security boundary.
 
 ## Limits
 

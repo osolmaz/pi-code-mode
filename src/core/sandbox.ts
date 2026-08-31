@@ -3,7 +3,6 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 
-import { digestProgram } from "./approval.js";
 import { resolveLimits } from "./limits.js";
 import { truncateUtf8 } from "./output.js";
 import type {
@@ -131,10 +130,7 @@ function runWorker(request: WorkerRequest, signal?: AbortSignal): Promise<Worker
   });
 }
 
-export async function executeApprovedProgram(
-  options: ExecuteProgramOptions,
-): Promise<CodeModeExecution> {
-  const digest = digestProgram(options.code);
+export async function executeProgram(options: ExecuteProgramOptions): Promise<CodeModeExecution> {
   try {
     const limits = resolveLimits(options.limits);
     const sourceBytes = Buffer.byteLength(options.code, "utf8");
@@ -144,15 +140,6 @@ export async function executeApprovedProgram(
     }
     throwIfAborted(options.signal);
 
-    const approved = await options.approve({
-      code: options.code,
-      digest,
-      rootDir: options.rootDir,
-      limits,
-    });
-    if (!approved) return { status: "denied", digest };
-    throwIfAborted(options.signal);
-
     const response = await runWorker(
       { code: options.code, rootDir: options.rootDir, limits },
       options.signal,
@@ -160,7 +147,6 @@ export async function executeApprovedProgram(
     if (!response.ok) {
       return {
         status: "failed",
-        digest,
         error: truncateUtf8(response.error, limits.maxOutputBytes).text,
         ...(response.stats === undefined ? {} : { stats: response.stats }),
       };
@@ -169,12 +155,11 @@ export async function executeApprovedProgram(
     const output = truncateUtf8(response.output, limits.maxOutputBytes);
     return {
       status: "completed",
-      digest,
       output: output.text,
       truncated: response.truncated || output.truncated,
       stats: response.stats,
     };
   } catch (error) {
-    return { status: "failed", digest, error: errorMessage(error) };
+    return { status: "failed", error: errorMessage(error) };
   }
 }

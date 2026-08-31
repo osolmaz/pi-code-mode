@@ -15,15 +15,6 @@ export type SandboxLimits = {
   maxOutputBytes: number;
 };
 
-export type ApprovalRequest = {
-  code: string;
-  digest: string;
-  rootDir: string;
-  limits: Readonly<SandboxLimits>;
-};
-
-export type ApprovalCallback = (request: ApprovalRequest) => boolean | Promise<boolean>;
-
 export type ExecutionStats = {
   toolCalls: number;
   scannedBytes: number;
@@ -32,19 +23,13 @@ export type ExecutionStats = {
 
 export type CodeModeExecution =
   | {
-      status: "denied";
-      digest: string;
-    }
-  | {
       status: "completed";
-      digest: string;
       output: string;
       truncated: boolean;
       stats: ExecutionStats;
     }
   | {
       status: "failed";
-      digest: string;
       error: string;
       stats?: ExecutionStats;
     };
@@ -52,7 +37,6 @@ export type CodeModeExecution =
 export type ExecuteProgramOptions = {
   code: string;
   rootDir: string;
-  approve: ApprovalCallback;
   limits?: Partial<SandboxLimits>;
   signal?: AbortSignal;
 };

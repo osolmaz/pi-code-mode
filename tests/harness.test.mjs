@@ -8,7 +8,6 @@ import {
   CODE_MODE_SYSTEM_PROMPT,
   createCodeModeResourceLoader,
   createCodeModeRuntime,
-  escapeApprovalText,
 } from "../src/index.ts";
 
 let agentDir;
@@ -24,17 +23,6 @@ afterEach(() => {
   rmSync(agentDir, { recursive: true, force: true });
 });
 
-describe("approval display", () => {
-  it("makes controls visible and distinguishes them from literal escapes", () => {
-    const rendered = escapeApprovalText(`\\\u001b\r\t\u202e\nplain`);
-
-    expect(rendered).toBe(
-      ["\\\\", "\\u{001b}", "\\u{000d}", "\\u{0009}", "\\u{202e}", "\nplain"].join(""),
-    );
-    expect(rendered).not.toContain("\u001b");
-  });
-});
-
 describe("standard Pi runtime", () => {
   it("uses the Code Mode agent directory and only exposes exec", async () => {
     const runtime = await createCodeModeRuntime({
@@ -42,7 +30,6 @@ describe("standard Pi runtime", () => {
       model: "gpt-5.4",
       cwd: root,
       agentDir,
-      approve: () => false,
     });
 
     try {
@@ -68,7 +55,6 @@ describe("SDK harness resource loader", () => {
     const loader = await createCodeModeResourceLoader({
       cwd: root,
       agentDir,
-      approve: () => false,
     });
 
     const extensions = loader.getExtensions();

@@ -9,8 +9,8 @@ The code runs in a fresh QuickJS isolate. It has no Node.js globals, shell, file
 
 Call text(value) to return output. Non-string values are JSON encoded when possible.
 
-Pass raw JavaScript in the code field without Markdown fences. Keep the program small and bounded. Use only relative paths. Every program requires separate human approval before execution.`;
+Pass raw JavaScript in the code field without Markdown fences. Keep the program small and bounded. Use only relative paths. The program runs automatically when you call exec.`;
 
 export const CODE_MODE_SYSTEM_PROMPT = `You are working in Code Mode. You have one tool named exec. Use it when you need information from the working directory.
 
-Write a small JavaScript program in exec.code. Compose the read-only functions on tools and call text(value) with the final useful result. Do not ask for or attempt shell commands, writes, network access, environment variables, absolute paths, credential files, or unbounded scans. If execution is denied, do not retry the same program unchanged.`;
+Write a small JavaScript program in exec.code. Compose the read-only functions on tools and call text(value) with the final useful result. Do not ask for or attempt shell commands, writes, network access, environment variables, absolute paths, credential files, or unbounded scans.`;

@@ -2,9 +2,9 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { executeApprovedProgram } from "../src/index.ts";
+import { executeProgram } from "../src/index.ts";
 
 let root;
 
@@ -20,10 +20,10 @@ afterEach(() => {
 });
 
 async function run(code, extra = {}) {
-  return executeApprovedProgram({ code, rootDir: root, approve: () => true, ...extra });
+  return executeProgram({ code, rootDir: root, ...extra });
 }
 
-describe("approved sandbox execution", () => {
+describe("sandbox execution", () => {
   it("composes all read-only tools", async () => {
     const result = await run(`
 const listed = await tools.ls({ path: "." });
@@ -73,31 +73,15 @@ text({ listed, found, matches, read });`);
     });
   });
 
-  it("requires approval before starting a worker", async () => {
-    const approve = vi.fn(() => false);
-    const result = await executeApprovedProgram({
-      code: "while (true) {}",
-      rootDir: join(root, "missing"),
-      approve,
-    });
-
-    expect(result.status).toBe("denied");
-    expect(approve).toHaveBeenCalledOnce();
-    expect(approve.mock.calls[0][0].code).toBe("while (true) {}");
-  });
-
-  it("rejects invalid limits and oversized source before approval", async () => {
-    const approve = vi.fn(() => true);
-    const oversized = await executeApprovedProgram({
+  it("rejects invalid limits and oversized source before execution", async () => {
+    const oversized = await executeProgram({
       code: "x".repeat(101),
       rootDir: root,
-      approve,
       limits: { maxSourceBytes: 100 },
     });
-    const invalidLimit = await executeApprovedProgram({
+    const invalidLimit = await executeProgram({
       code: 'text("safe");',
       rootDir: root,
-      approve,
       limits: { maxToolCalls: 0 },
     });
 
@@ -106,52 +90,36 @@ text({ listed, found, matches, read });`);
       status: "failed",
       error: "maxToolCalls must be a positive safe integer",
     });
-    expect(approve).not.toHaveBeenCalled();
   });
 
-  it("honors aborts before approval and during execution", async () => {
+  it("honors aborts before and during execution", async () => {
     const before = new AbortController();
-    const approve = vi.fn(() => true);
     before.abort();
-    const beforeResult = await executeApprovedProgram({
+    const beforeResult = await executeProgram({
       code: 'text("safe");',
       rootDir: root,
-      approve,
       signal: before.signal,
     });
 
     const during = new AbortController();
-    const duringResultPromise = executeApprovedProgram({
+    const duringResultPromise = executeProgram({
       code: "while (true) {}",
       rootDir: root,
-      approve: () => {
-        setTimeout(() => during.abort(), 50);
-        return true;
-      },
       signal: during.signal,
     });
+    setTimeout(() => during.abort(), 50);
     const duringResult = await duringResultPromise;
 
     expect(beforeResult).toMatchObject({ status: "failed", error: "execution aborted" });
-    expect(approve).not.toHaveBeenCalled();
     expect(duringResult).toMatchObject({ status: "failed", error: "execution aborted" });
   });
 
-  it("reports approval and worker setup failures", async () => {
-    const approvalFailure = await executeApprovedProgram({
-      code: 'text("safe");',
-      rootDir: root,
-      approve: () => {
-        throw "approval failed";
-      },
-    });
-    const setupFailure = await executeApprovedProgram({
+  it("reports worker setup failures", async () => {
+    const setupFailure = await executeProgram({
       code: 'text("safe");',
       rootDir: join(root, "missing"),
-      approve: () => true,
     });
 
-    expect(approvalFailure).toMatchObject({ status: "failed", error: "approval failed" });
     expect(setupFailure).toMatchObject({ status: "failed" });
   });
 

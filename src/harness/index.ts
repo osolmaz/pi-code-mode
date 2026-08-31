@@ -22,7 +22,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { CODE_MODE_SYSTEM_PROMPT } from "../core/prompt.js";
-import type { ApprovalCallback, SandboxLimits } from "../core/types.js";
+import type { SandboxLimits } from "../core/types.js";
 import { createCodeModeExtension } from "../extension/index.js";
 import { getCodeModeConfigPath } from "./config.js";
 
@@ -30,7 +30,6 @@ export type CreateCodeModeHarnessOptions = {
   provider: string;
   model: string;
   cwd: string;
-  approve: ApprovalCallback;
   apiKey?: string;
   limits?: Partial<SandboxLimits>;
 };
@@ -43,7 +42,7 @@ export type CodeModeHarness = {
 
 export type CreateCodeModeResourceLoaderOptions = Pick<
   CreateCodeModeHarnessOptions,
-  "cwd" | "approve" | "limits"
+  "cwd" | "limits"
 > & {
   agentDir?: string;
 };
@@ -63,7 +62,6 @@ export async function createCodeModeResourceLoader(
     systemPrompt: CODE_MODE_SYSTEM_PROMPT,
     extensionFactories: [
       createCodeModeExtension({
-        approve: options.approve,
         ...(options.limits === undefined ? {} : { limits: options.limits }),
       }),
     ],
@@ -101,7 +99,6 @@ export async function createCodeModeHarness(
   const resourceLoader = await createCodeModeResourceLoader({
     cwd: options.cwd,
     agentDir,
-    approve: options.approve,
     ...(options.limits === undefined ? {} : { limits: options.limits }),
   });
   const settingsManager = SettingsManager.inMemory({
@@ -164,7 +161,6 @@ export type CreateCodeModeRuntimeOptions = {
   model: string;
   cwd: string;
   agentDir?: string;
-  approve?: ApprovalCallback;
   apiKey?: string;
   limits?: Partial<SandboxLimits>;
 };
@@ -175,7 +171,6 @@ export async function createCodeModeRuntime(
   const agentDir = options.agentDir ?? dirname(getCodeModeConfigPath());
   const modelRuntime = await createModelRuntime(options.provider, options.apiKey);
   const extension = createCodeModeExtension({
-    ...(options.approve === undefined ? {} : { approve: options.approve }),
     ...(options.limits === undefined ? {} : { limits: options.limits }),
   });
 

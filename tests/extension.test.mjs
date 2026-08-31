@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createCodeModeExtension } from "../src/extension/index.ts";
 
@@ -41,8 +41,6 @@ function loadExtension(options = {}) {
 function context(overrides = {}) {
   return {
     cwd: root,
-    hasUI: false,
-    ui: { confirm: vi.fn(() => false) },
     ...overrides,
   };
 }
@@ -59,22 +57,22 @@ describe("Pi extension", () => {
     expect(extension.activeChanges).toEqual([["exec"], ["exec"], ["read", "bash"]]);
   });
 
-  it("denies non-interactive execution", async () => {
+  it("runs non-interactively without an approval callback", async () => {
     const extension = loadExtension();
     const result = await extension.tool.execute(
       "call-1",
-      { code: 'text("should not run");' },
+      { code: 'text("ran automatically");' },
       new AbortController().signal,
       undefined,
       context(),
     );
 
-    expect(result.details.status).toBe("denied");
-    expect(result.content[0].text).toContain("Execution denied");
+    expect(result.details.status).toBe("completed");
+    expect(result.content[0].text).toBe("ran automatically");
   });
 
   it("returns sandbox failures as tool results", async () => {
-    const extension = loadExtension({ approve: () => true });
+    const extension = loadExtension();
     const result = await extension.tool.execute(
       "call-failed",
       { code: "invalid JavaScript {{{" },
@@ -87,8 +85,8 @@ describe("Pi extension", () => {
     expect(result.content[0].text).toContain("Execution failed");
   });
 
-  it("reports empty and truncated approved output", async () => {
-    const extension = loadExtension({ approve: () => true, limits: { maxOutputBytes: 4 } });
+  it("reports empty and truncated output", async () => {
+    const extension = loadExtension({ limits: { maxOutputBytes: 4 } });
     const empty = await extension.tool.execute(
       "call-empty",
       { code: "const value = 1;" },
@@ -108,53 +106,23 @@ describe("Pi extension", () => {
     expect(truncated.content[0].text).toContain("[output truncated at the sandbox limit]");
   });
 
-  it("lets an interactive user deny the exact source", async () => {
-    const confirm = vi.fn(() => false);
+  it("does not use Pi UI confirmation", async () => {
     const extension = loadExtension();
-    const result = await extension.tool.execute(
-      "call-user-denied",
-      { code: 'text("safe");' },
-      undefined,
-      undefined,
-      context({ hasUI: true, ui: { confirm } }),
-    );
-
-    expect(confirm).toHaveBeenCalledOnce();
-    expect(result.details.status).toBe("denied");
-  });
-
-  it("escapes terminal controls before showing an approved source", async () => {
-    const confirm = vi.fn(() => true);
-    const extension = loadExtension();
-    const code = `/* control: \u001b[2J\r\t\u202e */\ntext("safe");`;
-    const result = await extension.tool.execute(
-      "call-controlled-source",
-      { code },
-      undefined,
-      undefined,
-      context({ hasUI: true, ui: { confirm } }),
-    );
-
-    const displayedSource = confirm.mock.calls[0][1];
-    expect(displayedSource).toContain("\\u{001b}[2J\\u{000d}\\u{0009}\\u{202e}");
-    expect(displayedSource).not.toContain("\u001b");
-    expect(result).toMatchObject({ details: { status: "completed" } });
-  });
-
-  it("shows and runs the exact approved source", async () => {
-    const confirm = vi.fn(() => true);
-    const extension = loadExtension();
-    const code = 'text("safe");';
     const result = await extension.tool.execute(
       "call-2",
-      { code },
+      { code: 'text("safe");' },
       new AbortController().signal,
       undefined,
-      context({ hasUI: true, ui: { confirm } }),
+      context({
+        hasUI: true,
+        ui: {
+          confirm: () => {
+            throw new Error("confirmation must not be requested");
+          },
+        },
+      }),
     );
 
-    expect(confirm).toHaveBeenCalledOnce();
-    expect(confirm.mock.calls[0][1]).toContain(code);
     expect(result).toMatchObject({ details: { status: "completed" } });
     expect(result.content[0].text).toBe("safe");
   });
