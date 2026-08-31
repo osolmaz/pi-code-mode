@@ -103,6 +103,382 @@ Generated JavaScript can request those operations only through the parent-side t
 
 ---
 
+## Comparison with other Code Mode implementations
+
+This comparison uses the source available on 2026-08-31. The inspected revisions were:
+
+- OpenAI Codex `1c1e17782aeb51a5a253997067fa887a9d593cc9`;
+- OpenClaw `c003292c236583f0b043be7f2f62234296de6e9d` from `upstream/main`;
+- OpenCode `9f69463f1d556af2b5b51d2efa1c04f5f544f911` from `dev`;
+- OMP, meaning Oh My Pi, `65f79e76fcc89b96632fe86a598f314bd7cfc725`.
+
+The revision identifiers make the comparison reproducible. The links below use each repository's relevant branch so they continue to point to the maintained source.
+
+### Summary
+
+| Implementation | Model-visible surface | Guest runtime | Long-running cells | Ambient host authority | Nested tool boundary |
+| --- | --- | --- | --- | --- | --- |
+| OpenAI Codex | Raw-source `exec` and structured `wait` | Rust host with sandbox-enabled V8 through `rusty_v8` | Live isolate pauses and resumes | No Node, filesystem, network, console, or module access | Calls return to the Codex session delegate |
+| OpenClaw | Structured `exec` and `wait`, plus required direct-only tools | QuickJS-WASI in a Node.js worker thread | QuickJS snapshots are stored and restored | No filesystem, network, process, environment, or modules | Calls return to the normal OpenClaw tool executor |
+| OpenCode | One structured `execute` tool | Owned TypeScript tree-walking interpreter over an Acorn AST | No `wait`; each program is one-shot | No ambient host APIs because unsupported syntax and globals are never implemented | Generic explicit tool tree; current adapter exposes MCP tools |
+| OMP | `eval` plus a direct keep-set such as `ask`, `todo`, and `yield` | Persistent language kernels; JavaScript runs under Bun | Kernel state persists; generic background jobs replace a Code Mode `wait` protocol | Broad Bun, filesystem, shell, network, process, and module authority | Enabled session tools are bridged through `tool.<name>()` |
+| This plan | Raw JavaScript `exec` and structured `wait` | Separate Rust `deno_core` and V8 host process | Live isolate pauses and resumes | No Deno, Node, filesystem, network, process, environment, or modules | Calls return to a frozen TypeScript broker owned by Pi |
+
+The implementations solve related problems, but they do not have the same security or lifecycle contract. The name “Code Mode” alone does not establish that code is isolated, that tools are nested, or that a `wait` operation exists.
+
+### OpenAI Codex
+
+OpenAI Codex is the closest implementation to this plan.
+
+#### Model contract
+
+Codex exposes a raw JavaScript `exec` tool. The tool description says that the source runs as an asynchronous module in a fresh V8 isolate. Nested tools are methods on the global `tools` object. A separate `wait` tool observes a yielded cell by `cell_id`.
+
+The model can also use:
+
+- `ALL_TOOLS` for bounded tool discovery;
+- `text`, `image`, `audio`, and generated-image output helpers;
+- `store` and `load` for session-scoped JSON values;
+- `notify` for progress;
+- `yield_control` for an explicit yield;
+- `setTimeout` and `clearTimeout`;
+- `exit` for an intentional early end.
+
+The source can include a first-line `// @exec:` pragma for the initial yield time and maximum output tokens. `exec` returns after completion, failure, or its yield boundary. `wait` returns only new output and can yield again with the same cell identifier.
+
+#### Host and runtime
+
+Codex separates the runtime into several Rust crates:
+
+- `code-mode-protocol` defines tool descriptions, session interfaces, runtime responses, framing, and host messages;
+- `code-mode-runtime` owns V8, cells, callbacks, globals, timers, values, and termination;
+- `code-mode-host` is a standalone executable with standard-I/O and gRPC transports;
+- `code-mode` is the Codex-side client and session provider.
+
+One lazily started host process can serve multiple Codex sessions. Each cell receives a fresh V8 isolate and runs on its own runtime thread. The host keeps session-scoped stored values and a map of live cells. The Codex process retains ownership of real tools through `CodeModeSessionDelegate`.
+
+Codex currently uses the `v8` crate directly with its `v8_enable_sandbox` feature. It does **not** use `deno_core` as its runtime abstraction. It imports `deno_core_icudata` only to initialize ICU data. This is the main implementation-level difference from this plan.
+
+The runtime deletes `console`, `Atomics`, `SharedArrayBuffer`, and `WebAssembly`. It installs only the intended globals. Static and dynamic module resolution reject imports. There is no Node or Deno global surface.
+
+The inspected implementation has a separate process and V8 sandbox support. It does not, by itself, establish the cross-platform operating-system policy sandbox specified later in this plan. This plan therefore keeps a stricter process-launch and OS-isolation requirement.
+
+#### Cell lifecycle
+
+Codex keeps yielded cells live. It does not serialize a V8 heap snapshot for each yield.
+
+A cell actor coordinates:
+
+- the V8 runtime thread;
+- one observer at a time;
+- nested tool promises;
+- output accumulated since the last observation;
+- cancellation and isolate termination;
+- completion and session-store commits.
+
+When execution reaches a pending frontier, the runtime can pause until `wait` resumes observation. A terminating request cancels nested work and calls V8's `terminate_execution()` through an isolate handle.
+
+This live-cell design is the direct precedent for the plan's `exec` and `wait` lifecycle.
+
+#### Tool authority
+
+Every `ExecuteRequest` contains the enabled tool definitions for that cell. A tool callback emits a typed nested call to the host. The host delegates that call back to Codex, where the parent session owns the real implementation and cancellation token.
+
+This is the same authority direction required by this plan:
+
+```text
+untrusted JavaScript
+  -> runtime callback
+  -> external host protocol
+  -> parent agent tool broker
+  -> real operation
+```
+
+The runtime never receives a generic shell, filesystem object, credential store, or HTTP client.
+
+#### Elements to adopt
+
+This plan will adopt the following Codex properties:
+
+- a separate, versioned host executable;
+- `exec` and `wait` as the model-visible control surface;
+- one live isolate per cell;
+- raw JavaScript evaluated as an asynchronous module;
+- nested tools on `tools`;
+- bounded discovery through `ALL_TOOLS`;
+- parent-owned tool execution;
+- cell-scoped cancellation and isolate termination;
+- session-scoped JSON storage rather than shared JavaScript heaps;
+- no compatibility fallback when the runtime is unavailable.
+
+This plan will not copy Codex internals or private interfaces. It will reproduce the public behavior through Pi's documented extension and Factory APIs.
+
+Sources:
+
+- [Codex Code Mode protocol and descriptions](https://github.com/openai/codex/tree/main/codex-rs/code-mode-protocol)
+- [Codex Code Mode runtime](https://github.com/openai/codex/tree/main/codex-rs/code-mode-runtime)
+- [Codex V8 globals](https://github.com/openai/codex/blob/main/codex-rs/code-mode-runtime/src/runtime/globals.rs)
+- [Codex cell actor](https://github.com/openai/codex/blob/main/codex-rs/code-mode-runtime/src/cell_actor/mod.rs)
+- [Codex remote session and host process](https://github.com/openai/codex/blob/main/codex-rs/code-mode/src/remote_session.rs)
+- [Codex standalone host](https://github.com/openai/codex/tree/main/codex-rs/code-mode-host)
+
+### OpenClaw
+
+OpenClaw is the second-closest implementation at the model and policy boundary. Its runtime and resume method are different.
+
+#### Model contract
+
+When enabled, OpenClaw hides catalog-compatible tools and exposes:
+
+- `exec`;
+- `wait`;
+- required direct-only tools whose result or control semantics cannot cross the bridge.
+
+Its `exec` input is structured and accepts `code`, an internal-compatible `command` alias, `language`, and a guarded `restartSafe` field. JavaScript and TypeScript are supported. TypeScript is transformed to JavaScript without type checking or module resolution.
+
+OpenClaw provides more discovery surfaces than Codex:
+
+- safe tool names can become direct guest globals;
+- `catalog.search()` and `catalog.all()` provide lazy lookup;
+- callable catalog handles provide `describe()`;
+- MCP tools use generated virtual declaration files and `MCP` namespaces;
+- `API.list()` and `API.read()` expose those declarations without filesystem access;
+- optional node, skill, and Swarm namespaces add domain-specific composition.
+
+#### Runtime and snapshots
+
+OpenClaw uses `quickjs-wasi` in a Node.js worker thread. It creates a QuickJS VM for initial execution. When a cell must wait, it serializes the QuickJS VM state and stores:
+
+- the snapshot;
+- pending bridge requests;
+- run and session scope;
+- output and lifecycle metadata.
+
+`wait` restores the snapshot into a new runtime and continues the suspended program. Snapshots are process-local, size-limited, scoped, and subject to a time-to-live. They do not survive a Gateway restart. OpenClaw separately supports guarded replay for a narrow set of proven replay-safe work; replay is not the same as restoring the old VM.
+
+This differs from the plan's live-isolate design. Snapshotting reduces the cost of parking many cells, but it creates a larger serialization contract and ties lifecycle correctness to QuickJS-WASI snapshot fidelity. The plan will keep live V8 isolates until measurements prove that snapshot support is necessary.
+
+#### Tool authority and policy
+
+OpenClaw builds the hidden catalog only after its normal effective tool policy is resolved. Each nested call crosses the host bridge and re-enters the normal executor with the original:
+
+- agent and session identity;
+- sender and channel context;
+- sandbox policy;
+- approval policy;
+- plugin hooks;
+- abort signal;
+- telemetry and trajectory context.
+
+Nested calls are projected as real child activity under the parent Code Mode call. The guest does not receive host errors or prototypes. Tool failures become plain catchable JavaScript errors.
+
+OpenClaw also tracks whether a failed cell started possible side effects. Ordinary recovery is allowed only when host evidence proves that no mutation started or that completed work was audited read-only. This is stronger than treating every JavaScript exception as safe to retry.
+
+#### Security
+
+The QuickJS guest receives no filesystem, network, subprocess, environment, package, or module authority. The worker thread protects the main event loop from cooperative failures, while QuickJS memory and interrupt controls stop bounded hostile programs. OpenClaw's own documentation states that operators can still need OS-level hardening.
+
+Default limits include a 10-second execution time, 64 MiB of guest memory, 64 KiB of output, 10 MiB per snapshot, 16 pending nested calls, and a 15-minute snapshot lifetime. These are useful starting points, not automatic proof that the same limits are correct for V8.
+
+#### Elements to adopt
+
+This plan will adopt or adapt:
+
+- fail-closed activation;
+- policy filtering before catalog construction;
+- run-scoped catalogs;
+- deterministic name-collision handling;
+- direct-only tool classification;
+- bounded lazy discovery for large catalogs;
+- nested-call transcript projection;
+- explicit side-effect and replay-safety metadata;
+- output, pending-call, memory, and expiry limits;
+- no recursive access to Code Mode control tools.
+
+This plan will not adopt QuickJS snapshots, worker-thread-only containment, or OpenClaw-specific namespaces.
+
+Sources:
+
+- [OpenClaw Code Mode documentation](https://github.com/openclaw/openclaw/blob/main/docs/tools/code-mode.md)
+- [OpenClaw Code Mode surface](https://github.com/openclaw/openclaw/blob/main/src/agents/code-mode.ts)
+- [OpenClaw execution coordinator](https://github.com/openclaw/openclaw/blob/main/src/agents/code-mode-execution.ts)
+- [OpenClaw QuickJS runtime adapter](https://github.com/openclaw/openclaw/blob/main/src/agents/code-mode-runtime.ts)
+- [OpenClaw host bridge](https://github.com/openclaw/openclaw/blob/main/src/agents/code-mode-bridge.ts)
+- [OpenClaw suspended-run state](https://github.com/openclaw/openclaw/blob/main/src/agents/code-mode-state.ts)
+
+### OpenCode
+
+OpenCode takes the smallest and most language-restrictive approach.
+
+#### Generic package
+
+The private workspace package `@opencode-ai/codemode` is host-neutral. A host builds an explicit tree of schema-described tools and calls either:
+
+```typescript
+CodeMode.execute({ tools, code });
+```
+
+or:
+
+```typescript
+const runtime = CodeMode.make({ tools });
+await runtime.execute(code);
+```
+
+The model-facing program can sequence, branch, loop, transform values, and run up to eight eagerly forked calls concurrently.
+
+#### Interpreter
+
+OpenCode does not embed V8, QuickJS, Bun, Deno, or Node for guest execution. It:
+
+1. removes supported TypeScript syntax;
+2. parses JavaScript with Acorn;
+3. evaluates the AST with an owned tree-walking interpreter;
+4. implements selected standard-library operations itself;
+5. copies tool inputs and outputs through plain-data and schema boundaries.
+
+Because the interpreter implements only selected syntax and globals, guest code cannot reach `eval`, modules, files, processes, or network APIs. There is no native JavaScript realm to escape. This gives a small capability boundary and deterministic control over syntax.
+
+The tradeoff is language compatibility. It is not arbitrary JavaScript. The design document lists missing promise pipelines, async iteration, standard-library variants, typed arrays, binary values, and other syntax or built-ins. Model-generated JavaScript that works in Codex or a browser can fail as unsupported syntax in OpenCode.
+
+#### Lifecycle and limits
+
+OpenCode execution is one-shot. It has no `wait`, live cell, snapshot, or persistent guest state. A reusable `CodeMode.make()` value reuses prepared catalog data and host tool definitions, not the lexical state of a previous program.
+
+The generic package supports optional limits for wall time, admitted tool calls, and output bytes. Those limits have no package defaults. The inspected OpenCode adapter does not set them, although the outer tool call can be interrupted through its abort signal.
+
+#### Current OpenCode adapter
+
+The current `execute` tool adapter exposes connected MCP tools after OpenCode permission filtering. It:
+
+- groups MCP tools by server namespace;
+- creates a schema-described tool tree;
+- asks for permission before each nested MCP call;
+- runs plugin before and after hooks;
+- records child-call state for the UI;
+- returns attachments through the normal OpenCode attachment channel.
+
+The generic package can host non-MCP tools, but the current product adapter is not a complete replacement for OpenCode's built-in tool surface.
+
+#### Elements to adopt
+
+This plan will adopt the explicit capability-tree principle, plain-data boundaries, schema validation, safe diagnostic projection, and bounded discovery ideas.
+
+This plan will not adopt a partial JavaScript interpreter. The product goal is to run the ordinary JavaScript that Code Mode-trained models generate. Maintaining a second language implementation would create a long compatibility tail and move effort away from host policy and lifecycle correctness.
+
+Sources:
+
+- [OpenCode Code Mode package README](https://github.com/anomalyco/opencode/blob/dev/packages/codemode/README.md)
+- [OpenCode Code Mode design](https://github.com/anomalyco/opencode/blob/dev/packages/codemode/codemode.md)
+- [OpenCode interpreter](https://github.com/anomalyco/opencode/blob/dev/packages/codemode/src/interpreter/runtime.ts)
+- [OpenCode host-neutral API](https://github.com/anomalyco/opencode/blob/dev/packages/codemode/src/codemode.ts)
+- [OpenCode MCP adapter](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/tool/code-mode.ts)
+
+### OMP
+
+OMP, or Oh My Pi, implements a Codex-aware Code Mode surface over its existing general-purpose `eval` system. It is the least similar runtime to this plan, even though it deliberately mirrors Codex provider metadata.
+
+#### Activation and model surface
+
+OMP's `providers.openai-codex.codeMode` setting can be `off`, `auto`, or `on`. It is off by default. `auto` activates for models whose catalog tool mode is `code_mode_only`.
+
+When active, OMP keeps a direct set that includes:
+
+- `eval`;
+- `ask`;
+- `todo`;
+- `yield`;
+- `think`;
+- checkpoint and rewind controls;
+- internal agent, budget, completion, and concurrency bridges.
+
+Other enabled session tools are removed from the direct model surface and advertised as `tool.<name>(args)` methods inside `eval`. OMP also emits Codex-compatible `tool_namespaces_info` metadata that identifies direct, bridged, deferred, harness, and MCP functions.
+
+OMP therefore matches part of Codex's provider-facing tool partition, but its model tool is `eval`, not Codex's raw-source `exec`, and it does not provide the same `exec` and `wait` cell protocol.
+
+#### Runtime
+
+OMP's `eval` tool is a general persistent notebook-like system. It supports:
+
+- JavaScript under Bun;
+- Python through an IPython kernel;
+- optional Ruby and Julia kernels;
+- persistent state across cells;
+- reset operations;
+- cell timeouts;
+- generic background jobs and later delivery;
+- output, images, artifacts, subagents, and completion helpers.
+
+The JavaScript path runs source through indirect global `eval` in a retained worker or subprocess. Its own model prompt explicitly advertises `Bun.file`, `Bun.write`, `Bun.$`, `fetch`, and `Buffer`. The runtime also supports Node-compatible filesystem, process, module, and stream APIs.
+
+This is intentional general code execution, not a capability-free Code Mode guest. The prompt asks models to prefer `tool.*` so calls use the session pipeline, but prompt preference is not a security boundary. Generated code can use ambient filesystem, shell, network, and module APIs directly.
+
+#### Tool bridge
+
+The JavaScript prelude forwards `tool.<name>(args)` to the parent worker protocol. The parent resolves only currently enabled tools and applies the available ACP permission wrapper. Results are reduced to text, details, images, and error state before returning to the cell.
+
+The top-level `eval` tool has execution approval semantics and can show its language and source in approval details. This is a broad code-execution grant. It is different from granting a capability-free program and then applying policy separately to each nested operation.
+
+#### Lifecycle
+
+OMP persists language-kernel state across separate `eval` calls. Long-running work can become a generic background job and later deliver output. This is useful notebook behavior, but it is not the same lifecycle as a bounded Code Mode cell:
+
+- there is no isolated fresh JavaScript realm per `exec`;
+- there is no Code Mode cell identifier returned for `wait`;
+- session state includes arbitrary language objects, imported modules, open resources, and host references;
+- a kernel restart can lose all retained state;
+- the authority of one cell is much broader than a frozen nested-tool catalog.
+
+#### Elements to adopt
+
+This plan can adopt OMP's provider metadata compatibility, generated TypeScript declarations, model-aware activation tests, and clear rendering of nested activity.
+
+This plan will not adopt ambient Bun authority, general language kernels, prompt-enforced restrictions, or persistent arbitrary JavaScript heaps. Those choices conflict with the plan's hostile-code trust model.
+
+Sources:
+
+- [OMP Code Mode surface partition](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/session/code-mode.ts)
+- [OMP Code Mode prompt](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/prompts/tools/eval-code-mode.md)
+- [OMP eval tool](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/tools/eval.ts)
+- [OMP JavaScript runtime](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/eval/js/shared/runtime.ts)
+- [OMP JavaScript tool bridge](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/eval/js/tool-bridge.ts)
+- [OMP settings reference](https://github.com/can1357/oh-my-pi/blob/main/docs/settings.md)
+
+### Relative fit for Pi Code Mode
+
+The comparison gives four different kinds of closeness.
+
+| Question | Closest implementation | Reason |
+| --- | --- | --- |
+| Which host and cell architecture is closest? | OpenAI Codex | Separate Rust host, V8 isolates, live cells, `exec`, `wait`, and parent delegates |
+| Which policy and catalog design is strongest? | OpenClaw | Run-scoped filtering, lazy discovery, direct-only tools, normal executor re-entry, and side-effect evidence |
+| Which implementation has the smallest language boundary? | OpenCode | No native JavaScript engine and only an owned syntax subset |
+| Which implementation is the most flexible coding environment? | OMP | Persistent multi-language kernels with broad host capabilities |
+| Which implementation best matches this product goal? | OpenAI Codex | The plan exists to provide Codex-like Code Mode in an ordinary Pi session |
+
+The intended result is not a line-for-line clone of one project. It combines:
+
+- Codex's external host, V8 cell, `exec`, `wait`, and parent-delegate architecture;
+- OpenClaw's policy ordering, catalog lifecycle, limits, transcript projection, and failure discipline;
+- OpenCode's explicit capability tree, plain-data crossing, and schema discipline;
+- OMP's provider metadata and generated declaration lessons, without its ambient execution authority.
+
+### Deliberate differences from Codex
+
+This plan remains different from current Codex in the following ways:
+
+1. It uses `deno_core` as the V8 embedding layer, while Codex uses `rusty_v8` directly.
+2. It requires a documented operating-system process-isolation policy in addition to V8's own sandbox.
+3. It is a Pi extension and Pi Factory harness, not a modification to Pi core.
+4. It uses a TypeScript parent broker because Pi's public extension API owns tools and session context.
+5. Its initial nested catalog is intentionally narrow and read-only until each additional capability has a reviewed policy contract.
+6. It does not expose Codex-specific media helpers unless Pi has a documented value and rendering path for them.
+7. It will not depend on Codex binaries, protocols, source packages, or private provider behavior.
+
+`deno_core` must remain an internal implementation detail. The guest will not receive Deno APIs. If the implementation cannot prevent `deno_core` from expanding the guest authority beyond the frozen tool catalog, the runtime choice fails the acceptance criteria.
+
+---
+
 ## Trust model
 
 The design will use four trust levels.
