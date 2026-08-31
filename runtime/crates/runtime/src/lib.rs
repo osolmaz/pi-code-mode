@@ -202,13 +202,6 @@ impl Future for RuntimeExecution {
             .completion
             .as_mut()
             .expect("program completion must exist after startup");
-        if let Poll::Ready(result) = completion.as_mut().poll(context) {
-            return Poll::Ready(match result {
-                Ok(()) => Ok(()),
-                Err(message) if message.contains("__PI_CODE_MODE_EXIT__") => Ok(()),
-                Err(message) => Err(this.classify_error(message)),
-            });
-        }
 
         this.watchdog.arm(this.cpu_limit);
         let event_loop = this
@@ -218,7 +211,12 @@ impl Future for RuntimeExecution {
 
         if let Poll::Ready(result) = event_loop {
             if let Err(error) = result {
-                return Poll::Ready(Err(this.classify_error(error.to_string())));
+                let message = error.to_string();
+                return Poll::Ready(if message.contains("__PI_CODE_MODE_EXIT__") {
+                    Ok(())
+                } else {
+                    Err(this.classify_error(message))
+                });
             }
             if let Poll::Ready(result) = completion.as_mut().poll(context) {
                 return Poll::Ready(match result {

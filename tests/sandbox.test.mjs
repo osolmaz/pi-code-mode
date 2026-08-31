@@ -131,6 +131,29 @@ text({ listed, found, matches, read });`);
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
+  it("releases active-cell slots when abort races cell startup", async () => {
+    const limits = resolveLimits();
+
+    for (let index = 0; index < 6; index += 1) {
+      const broker = new CodeModeBroker(root, createReadOnlyCatalog(root, limits));
+      const controller = new AbortController();
+      const execution = session.exec(
+        "await new Promise((resolve) => setTimeout(resolve, 100));",
+        `startup-abort-${String(index)}`,
+        broker,
+        limits,
+        controller.signal,
+      );
+      void Promise.resolve().then(() => controller.abort());
+      const result = await execution;
+      expect(result.status).toBe("terminated");
+    }
+
+    const result = await run('text("slot available");');
+    expect(result.status).toBe("completed");
+    expect(outputText(result)).toBe("slot available");
+  });
+
   it("interrupts an infinite loop at the active CPU limit", async () => {
     const started = Date.now();
 
@@ -149,6 +172,17 @@ text({ listed, found, matches, read });`);
     expect(Buffer.byteLength(outputText(ascii), "utf8")).toBe(128);
     expect(unicode).toMatchObject({ status: "completed", truncated: true });
     expect(outputText(unicode)).toBe("");
+  });
+
+  it("runs scheduled timer callbacks before a cell completes", async () => {
+    const result = await run(`
+setTimeout(() => {
+  text("first");
+  setTimeout(() => text("second"), 5);
+}, 5);`);
+
+    expect(result.status).toBe("completed");
+    expect(outputText(result)).toBe("first\nsecond");
   });
 
   it("yields a long cell and resumes it through wait", async () => {

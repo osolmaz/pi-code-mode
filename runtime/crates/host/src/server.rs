@@ -339,16 +339,15 @@ async fn exec_cell(state: &Arc<ServerState>, params: Value) -> Result<Value, Pro
     match session.insert_cell(cell_id.clone(), cell.clone()).await {
         InsertCellResult::Inserted => {}
         InsertCellResult::Cancelled => {
-            cell.terminate();
             let result = cell
                 .observe(ObserveOptions {
                     yield_time_ms: 0,
                     max_output_bytes: params.options.max_output_bytes,
                     terminate: true,
                 })
-                .await?;
-            release_terminal(state, &session, &cell_id, &cell, result.status).await;
-            return encode(result);
+                .await;
+            release_cell(state, &session, &cell);
+            return encode(result?);
         }
         InsertCellResult::Duplicate => {
             cell.terminate();
