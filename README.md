@@ -62,7 +62,7 @@ cd ./safe-fixture
 pi-code-mode
 ```
 
-The config is at `$XDG_CONFIG_HOME/pi-code-mode/config.json`, or `~/.config/pi-code-mode/config.json` when `XDG_CONFIG_HOME` is not set. It stores only `provider`, `model`, and the optional `apiKeyEnv` name. It never stores the key. Command-line options override saved values.
+The config is at `$XDG_CONFIG_HOME/pi-code-mode/config.json`, or `~/.config/pi-code-mode/config.json` when `XDG_CONFIG_HOME` is not set. It stores only `provider`, `model`, and the optional `apiKeyEnv` name. It never stores the key. Command-line options override saved values. When `apiKeyEnv` is not set, the app uses Pi's existing credential store in place, including credentials saved with `/login`.
 
 The standalone app keeps its Pi settings and session history in the same `pi-code-mode` configuration directory. It does not load or change the normal Pi agent directory. A session records its working directory because Code Mode uses that directory as the active read-only sandbox root.
 

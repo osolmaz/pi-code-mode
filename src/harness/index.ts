@@ -78,8 +78,9 @@ export async function createCodeModeResourceLoader(
 }
 
 async function createModelRuntime(provider: string, apiKey?: string): Promise<ModelRuntime> {
+  if (apiKey === undefined) return ModelRuntime.create();
   const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore() });
-  if (apiKey !== undefined) await modelRuntime.setRuntimeApiKey(provider, apiKey);
+  await modelRuntime.setRuntimeApiKey(provider, apiKey);
   return modelRuntime;
 }
 
