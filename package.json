@@ -1,7 +1,7 @@
 {
   "name": "pi-code-mode",
-  "version": "0.1.0",
-  "description": "Run model-written JavaScript through one read-only Pi tool.",
+  "version": "0.2.0",
+  "description": "Run OpenAI-shaped Code Mode in Pi through an isolated V8 host.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -28,7 +28,9 @@
   },
   "scripts": {
     "clean": "rm -rf coverage dist",
-    "build": "tsc --project tsconfig.build.json",
+    "build": "npm run clean && npm run build:host && npm run build:ts",
+    "build:host": "node scripts/build-host.mjs",
+    "build:ts": "tsc --project tsconfig.build.json",
     "postbuild": "node --input-type=module -e \"import { chmodSync } from 'node:fs'; chmodSync('dist/harness/cli.js', 0o755)\"",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
@@ -40,12 +42,13 @@
     "mutate": "stryker run stryker.config.mjs",
     "slophammer": "slophammer-ts check .",
     "simpledoc": "simpledoc check",
-    "check": "npm run format && npm run lint && npm run typecheck && npm run test && npm run coverage && npm run dry && npm run simpledoc",
+    "rust:format": "cargo fmt --manifest-path runtime/Cargo.toml --all -- --check",
+    "rust:lint": "cargo clippy --manifest-path runtime/Cargo.toml --workspace --all-targets -- -D warnings",
+    "rust:test": "cargo test --manifest-path runtime/Cargo.toml --workspace",
+    "check": "npm run format && npm run lint && npm run typecheck && npm run rust:format && npm run rust:lint && npm run rust:test && npm run test && npm run coverage && npm run dry && npm run simpledoc",
     "prepare": "npm run build"
   },
-  "dependencies": {
-    "quickjs-emscripten": "0.32.0"
-  },
+  "dependencies": {},
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": ">=0.84.3",

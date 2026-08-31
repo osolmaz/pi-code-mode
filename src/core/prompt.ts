@@ -1,16 +1,27 @@
-export const CODE_MODE_TOOL_DESCRIPTION = `Run JavaScript code to compose read-only file tool calls.
+export const CODE_MODE_TOOL_DESCRIPTION = `Execute JavaScript in an isolated V8 cell and compose the available tools from code.
 
-The code runs in a fresh QuickJS isolate. It has no Node.js globals, shell, file system, network, environment variables, console, or module loader. The only host capabilities are on the global tools object:
+Send raw JavaScript without JSON wrapping or Markdown fences. The source runs as the body of an async function. It has no Node.js, Deno, shell, file-system, network, environment, console, WebAssembly, or module capability.
 
-- await tools.read({ path, offset?, limit? }) returns a UTF-8 string. offset and limit count lines.
-- await tools.grep({ path?, pattern, caseSensitive?, maxResults? }) returns an array of { path, line, text } matches.
-- await tools.find({ path?, pattern?, maxResults? }) returns an array of relative path strings. The pattern is a glob.
-- await tools.ls({ path?, maxResults? }) returns an array of { name, type } directory entries.
+Available globals:
+- tools: frozen async tool functions
+- ALL_TOOLS: frozen tool metadata
+- text(value): emit useful model-visible output
+- notify(message): emit a progress notification
+- store(key, value) and load(key): session-scoped JSON values
+- yield_control(): pause until a later wait call
+- setTimeout(callback, delay) and clearTimeout(id): bounded timers
+- exit(): finish early
 
-Call text(value) to return output. Non-string values are JSON encoded when possible.
+Available tool functions:
+- await tools.read({ path, offset?, limit? })
+- await tools.grep({ path?, pattern, caseSensitive?, maxResults? })
+- await tools.find({ path?, pattern?, maxResults? })
+- await tools.ls({ path?, maxResults? })
 
-Pass raw JavaScript in the code field without Markdown fences. Keep the program small and bounded. Use only relative paths. The program runs automatically when you call exec.`;
+Use sequential statements, conditions, loops, Promise.all, filtering, and aggregation when useful. Keep intermediate data inside the cell and call text(value) only with the result needed by the model. If exec returns a cell_id with waiting status, call wait to observe or terminate that cell.`;
 
-export const CODE_MODE_SYSTEM_PROMPT = `You are working in Code Mode. You have one tool named exec. Use it when you need information from the working directory.
+export const CODE_MODE_WAIT_DESCRIPTION = `Observe an existing Code Mode cell. Returns only output produced since the previous observation. Use terminate=true to stop it.`;
 
-Write a small JavaScript program in exec.code. Compose the read-only functions on tools and call text(value) with the final useful result. Do not ask for or attempt shell commands, writes, network access, environment variables, absolute paths, credential files, or unbounded scans.`;
+export const CODE_MODE_SYSTEM_PROMPT = `You are working in Code Mode. The only model-visible tools are exec and wait.
+
+Use exec to inspect the working directory through its read-only tools. Send raw JavaScript, compose tool calls inside the program, and emit the useful result with text(value). Use wait only when exec returns a waiting cell. Do not request shell commands, writes, network access, environment variables, absolute paths, credentials, or unbounded work.`;

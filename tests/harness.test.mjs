@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 describe("standard Pi runtime", () => {
-  it("uses the Code Mode agent directory and only exposes exec", async () => {
+  it("uses the Code Mode agent directory and exposes only exec and wait", async () => {
     const runtime = await createCodeModeRuntime({
       provider: "openai",
       model: "gpt-5.4",
@@ -43,7 +43,7 @@ describe("standard Pi runtime", () => {
       });
       expect(runtime.services.resourceLoader.getAgentsFiles()).toEqual({ agentsFiles: [] });
       expect(runtime.services.resourceLoader.getSystemPrompt()).toBe(CODE_MODE_SYSTEM_PROMPT);
-      expect(runtime.session.agent.state.tools.map((tool) => tool.name)).toEqual(["exec"]);
+      expect(runtime.session.agent.state.tools.map((tool) => tool.name)).toEqual(["exec", "wait"]);
     } finally {
       await runtime.dispose();
     }

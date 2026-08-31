@@ -1,61 +1,49 @@
-export const CODE_MODE_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
+export type CodeModeToolName = "read" | "grep" | "find" | "ls";
 
-export type CodeModeToolName = (typeof CODE_MODE_TOOL_NAMES)[number];
-
-export type SandboxLimits = {
+export type CodeModeLimits = {
   maxSourceBytes: number;
-  timeoutMs: number;
-  memoryBytes: number;
-  stackBytes: number;
+  maxHeapBytes: number;
+  maxOutputBytes: number;
   maxToolCalls: number;
+  maxConcurrentToolCalls: number;
+  maxToolInputBytes: number;
+  maxToolResultBytes: number;
+  maxTotalToolResultBytes: number;
+  maxStoreBytes: number;
+  maxTimerMs: number;
+  maxTimers: number;
+  cpuLimitMs: number;
+  wallTimeMs: number;
+  initialYieldTimeMs: number;
   maxReadBytes: number;
   maxScannedBytes: number;
   maxScannedEntries: number;
   maxResults: number;
-  maxOutputBytes: number;
 };
 
-export type ExecutionStats = {
+export type ReadOnlyStats = {
   toolCalls: number;
   scannedBytes: number;
   scannedEntries: number;
 };
 
-export type CodeModeExecution =
-  | {
-      status: "completed";
-      output: string;
-      truncated: boolean;
-      stats: ExecutionStats;
-    }
-  | {
-      status: "failed";
-      error: string;
-      stats?: ExecutionStats;
-    };
+export type CodeModeOutput =
+  | { type: "text"; text: string }
+  | { type: "notification"; message: string };
 
-export type ExecuteProgramOptions = {
-  code: string;
-  rootDir: string;
-  limits?: Partial<SandboxLimits>;
-  signal?: AbortSignal;
+export type CodeModeStats = {
+  toolCalls: number;
+  outputBytes: number;
+  wallTimeMs: number;
 };
 
-export type WorkerRequest = {
-  code: string;
-  rootDir: string;
-  limits: SandboxLimits;
-};
+export type CodeModeCellStatus = "completed" | "failed" | "waiting" | "terminated";
 
-export type WorkerResponse =
-  | {
-      ok: true;
-      output: string;
-      truncated: boolean;
-      stats: ExecutionStats;
-    }
-  | {
-      ok: false;
-      error: string;
-      stats?: ExecutionStats;
-    };
+export type CodeModeCellResult = {
+  status: CodeModeCellStatus;
+  cellId: string;
+  output: CodeModeOutput[];
+  truncated: boolean;
+  stats: CodeModeStats;
+  error?: string;
+};

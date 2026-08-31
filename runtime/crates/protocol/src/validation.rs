@@ -6,6 +6,7 @@ const MAX_ID_BYTES: usize = 256;
 
 pub fn validate_exec(params: &CellExecParams) -> Result<(), ProtocolError> {
     validate_id(&params.session_id, "sessionId")?;
+    validate_id(&params.cell_id, "cellId")?;
     validate_id(&params.parent_tool_call_id, "parentToolCallId")?;
     if params.source.is_empty() {
         return Err(ProtocolError::new(

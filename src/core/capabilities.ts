@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
-import type { CodeModeToolName, ExecutionStats, SandboxLimits } from "./types.js";
+import type { CodeModeLimits, CodeModeToolName, ReadOnlyStats } from "./types.js";
 
 const RECURSIVE_SKIP_DIRECTORIES = new Set([".git", "coverage", "dist", "node_modules"]);
 const SENSITIVE_NAMES = new Set([
@@ -156,18 +156,18 @@ function shouldContinueLineScan(
 }
 
 export class ReadOnlyCapabilityHost {
-  readonly #limits: SandboxLimits;
+  readonly #limits: CodeModeLimits;
   readonly #root: string;
   readonly #visitedDirectories = new Set<string>();
-  readonly #stats: ExecutionStats = { toolCalls: 0, scannedBytes: 0, scannedEntries: 0 };
+  readonly #stats: ReadOnlyStats = { toolCalls: 0, scannedBytes: 0, scannedEntries: 0 };
 
-  constructor(rootDir: string, limits: SandboxLimits) {
+  constructor(rootDir: string, limits: CodeModeLimits) {
     this.#root = realpathSync(rootDir);
     if (!statSync(this.#root).isDirectory()) throw new Error("rootDir must be a directory");
     this.#limits = limits;
   }
 
-  get stats(): ExecutionStats {
+  get stats(): ReadOnlyStats {
     return { ...this.#stats };
   }
 

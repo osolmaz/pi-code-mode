@@ -164,6 +164,7 @@ pub struct SessionCloseParams {
 #[serde(rename_all = "camelCase")]
 pub struct CellExecParams {
     pub session_id: String,
+    pub cell_id: String,
     pub parent_tool_call_id: String,
     pub source: String,
     pub tools: Vec<ToolDefinition>,
