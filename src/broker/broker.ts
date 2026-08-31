@@ -8,6 +8,11 @@ export class CodeModeBroker {
   constructor(cwd: string, descriptors: readonly CodeModeToolDescriptor[]) {
     const byName = new Map<string, CodeModeToolDescriptor>();
     for (const descriptor of descriptors) {
+      if (descriptor.effect !== "read") {
+        throw new Error(
+          `Code Mode only accepts read-only tools: ${descriptor.codeModeName} has ${descriptor.effect} effect`,
+        );
+      }
       if (descriptor.directOnly === true) continue;
       if (byName.has(descriptor.codeModeName)) {
         throw new Error(`duplicate Code Mode tool name: ${descriptor.codeModeName}`);

@@ -185,6 +185,29 @@ setTimeout(() => {
     expect(outputText(result)).toBe("first\nsecond");
   });
 
+  it("cancels cleared timers without keeping the cell alive", async () => {
+    const started = Date.now();
+    const result = await run(`
+const timer = setTimeout(() => text("late"), 1_000);
+clearTimeout(timer);
+text("done");`);
+
+    expect(result.status).toBe("completed");
+    expect(outputText(result)).toBe("done");
+    expect(Date.now() - started).toBeLessThan(750);
+  });
+
+  it("accepts an immediate zero-duration observation", async () => {
+    const initial = await run('// @exec:{"yield_time_ms":0}\ntext("done");');
+    const result =
+      initial.status === "waiting"
+        ? await session.wait(initial.cellId, 1_000, 1_000, false, resolveLimits())
+        : initial;
+
+    expect(result.status).toBe("completed");
+    expect(outputText(result)).toBe("done");
+  });
+
   it("yields a long cell and resumes it through wait", async () => {
     const limits = resolveLimits({ initialYieldTimeMs: 10 });
     const broker = new CodeModeBroker(root, createReadOnlyCatalog(root, limits));
@@ -208,6 +231,13 @@ setTimeout(() => {
     expect(stored.status).toBe("completed");
     expect(loaded.status).toBe("completed");
     expect(JSON.parse(outputText(loaded))).toEqual({ value: 42 });
+  });
+
+  it("enforces a configured store limit below the host maximum", async () => {
+    const result = await run('store("long", "value");', { maxStoreBytes: 8 });
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("session store limit exceeded");
   });
 
   it("returns syntax errors without crashing the host", async () => {

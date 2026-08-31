@@ -29,6 +29,14 @@ describe("nested tool broker", () => {
     expect(Object.isFrozen(broker.descriptors[0])).toBe(true);
   });
 
+  it("rejects tools with effects beyond read-only access", () => {
+    for (const effect of ["write", "execute", "network", "interactive"]) {
+      expect(
+        () => new CodeModeBroker("/work", [descriptor("unsafe", async () => "no", { effect })]),
+      ).toThrow("Code Mode only accepts read-only tools");
+    }
+  });
+
   it("rejects duplicate and unknown tool names", async () => {
     expect(
       () =>

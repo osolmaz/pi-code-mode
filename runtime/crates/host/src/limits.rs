@@ -46,7 +46,9 @@ pub fn runtime_limits(options: &ExecutionOptions) -> Result<RuntimeLimits, Proto
     bounded(options.max_timers, MAX_TIMERS, "maxTimers")?;
     bounded(options.cpu_limit_ms, MAX_CPU_LIMIT_MS, "cpuLimitMs")?;
     bounded(options.wall_time_ms, MAX_WALL_TIME_MS, "wallTimeMs")?;
-    bounded(options.yield_time_ms, MAX_YIELD_TIME_MS, "yieldTimeMs")?;
+    if options.yield_time_ms > MAX_YIELD_TIME_MS {
+        return Err(invalid_limit("yieldTimeMs"));
+    }
     Ok(RuntimeLimits {
         max_heap_bytes: options.max_heap_bytes,
         max_output_bytes: options.max_output_bytes,
