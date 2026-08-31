@@ -10,7 +10,7 @@ use pi_code_mode_protocol::{
     CellExecParams, CellStatus, CellTerminateParams, CellWaitParams, ClientHello, Envelope,
     ErrorCode, FrameError, HOST_NAME, HostCapabilities, HostHello, HostInfo, MAX_FRAME_BYTES,
     PROTOCOL_VERSION, ProtocolError, Request, Response, SessionCloseParams, SessionOpened,
-    ToolKind, write_frame,
+    ToolDefinition, ToolKind, write_frame,
 };
 use pi_code_mode_runtime::{OutputBuffer, RuntimeTool, SharedToolInvoker};
 use serde::de::DeserializeOwned;
@@ -20,8 +20,8 @@ use uuid::Uuid;
 
 use crate::cell::{CellHandle, CellSpawnConfig, ObserveOptions, spawn_cell};
 use crate::delegate::{PendingCalls, ProtocolDelegate, resolve_response};
-use crate::limits::{MAX_OUTPUT_BYTES, runtime_limits, validate_observation};
-use crate::session::HostSession;
+use crate::limits::{runtime_limits, validate_observation};
+use crate::session::{HostSession, InsertCellResult};
 
 const MAX_ACTIVE_CELLS_PER_SESSION: usize = 4;
 const MAX_ACTIVE_CELLS_PER_HOST: usize = 8;
@@ -271,8 +271,7 @@ async fn close_session(state: &ServerState, params: Value) -> Result<Value, Prot
 }
 
 async fn close_session_cells(state: &ServerState, session: &HostSession) {
-    let cells = std::mem::take(&mut *session.cells.lock().await);
-    for cell in cells.into_values() {
+    for cell in session.take_cells().await.into_values() {
         cell.terminate();
         release_cell(state, session, &cell);
     }
@@ -297,7 +296,7 @@ async fn exec_cell(state: &Arc<ServerState>, params: Value) -> Result<Value, Pro
         ));
     }
 
-    let cell_id = Uuid::new_v4().to_string();
+    let cell_id = params.cell_id.clone();
     let delegate: SharedToolInvoker = Arc::new(ProtocolDelegate::new(
         params.session_id.clone(),
         cell_id.clone(),
@@ -306,26 +305,13 @@ async fn exec_cell(state: &Arc<ServerState>, params: Value) -> Result<Value, Pro
         Arc::clone(&state.pending),
         Arc::clone(&state.next_request_id),
     ));
-    let tools = params
-        .tools
-        .iter()
-        .map(|tool| RuntimeTool {
-            name: tool.code_mode_name.clone(),
-            description: tool.description.clone(),
-            deferred: tool.deferred,
-        })
-        .collect::<Vec<_>>();
-    if params
-        .tools
-        .iter()
-        .any(|tool| !matches!(tool.kind, ToolKind::Function | ToolKind::Freeform))
-    {
-        release_reserved(state, &session);
-        return Err(ProtocolError::new(
-            ErrorCode::InvalidInput,
-            "unsupported nested tool kind",
-        ));
-    }
+    let tools = match runtime_tools(&params.tools) {
+        Ok(tools) => tools,
+        Err(error) => {
+            release_reserved(state, &session);
+            return Err(error);
+        }
+    };
     let spawn = CellSpawnConfig {
         id: cell_id.clone(),
         source: params.source,
@@ -350,7 +336,29 @@ async fn exec_cell(state: &Arc<ServerState>, params: Value) -> Result<Value, Pro
             ));
         }
     };
-    session.cells.lock().await.insert(cell_id, cell.clone());
+    match session.insert_cell(cell_id.clone(), cell.clone()).await {
+        InsertCellResult::Inserted => {}
+        InsertCellResult::Cancelled => {
+            cell.terminate();
+            let result = cell
+                .observe(ObserveOptions {
+                    yield_time_ms: 0,
+                    max_output_bytes: params.options.max_output_bytes,
+                    terminate: true,
+                })
+                .await?;
+            release_terminal(state, &session, &cell_id, &cell, result.status).await;
+            return encode(result);
+        }
+        InsertCellResult::Duplicate => {
+            cell.terminate();
+            release_reserved(state, &session);
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidInput,
+                "cell id is already in use",
+            ));
+        }
+    }
     let result = cell
         .observe(ObserveOptions {
             yield_time_ms: params.options.yield_time_ms,
@@ -358,7 +366,7 @@ async fn exec_cell(state: &Arc<ServerState>, params: Value) -> Result<Value, Pro
             terminate: false,
         })
         .await?;
-    release_terminal(state, &session, &cell, result.status);
+    release_terminal(state, &session, &cell_id, &cell, result.status).await;
     encode(result)
 }
 
@@ -375,42 +383,36 @@ async fn wait_cell(state: &Arc<ServerState>, params: Value) -> Result<Value, Pro
             terminate: params.terminate,
         })
         .await?;
-    release_terminal(state, &session, &cell, result.status);
+    release_terminal(state, &session, &params.cell_id, &cell, result.status).await;
     encode(result)
 }
 
 async fn terminate_cell(state: &Arc<ServerState>, params: Value) -> Result<Value, ProtocolError> {
     let params: CellTerminateParams = parse_params(params)?;
     let session = state.require_session(&params.session_id).await?;
-    let cell = find_cell(&session, &params.cell_id).await?;
-    let result = cell
-        .observe(ObserveOptions {
-            yield_time_ms: 0,
-            max_output_bytes: MAX_OUTPUT_BYTES,
-            terminate: true,
-        })
-        .await?;
-    release_terminal(state, &session, &cell, result.status);
-    encode(result)
+    if let Some(cell) = session.request_termination(&params.cell_id).await {
+        cell.terminate();
+        return Ok(json!({"terminating": true}));
+    }
+    Ok(json!({"pending": true}))
 }
 
 async fn find_cell(session: &HostSession, cell_id: &str) -> Result<CellHandle, ProtocolError> {
     session
-        .cells
-        .lock()
+        .find_cell(cell_id)
         .await
-        .get(cell_id)
-        .cloned()
         .ok_or_else(|| ProtocolError::new(ErrorCode::CellNotFound, "cell was not found"))
 }
 
-fn release_terminal(
+async fn release_terminal(
     state: &ServerState,
     session: &HostSession,
+    cell_id: &str,
     cell: &CellHandle,
     status: CellStatus,
 ) {
     if status != CellStatus::Waiting {
+        session.remove_cell(cell_id).await;
         release_cell(state, session, cell);
     }
 }
@@ -425,6 +427,26 @@ fn release_cell(state: &ServerState, session: &HostSession, cell: &CellHandle) {
 fn release_reserved(state: &ServerState, session: &HostSession) {
     session.release_cell();
     state.release_host_cell();
+}
+
+fn runtime_tools(tools: &[ToolDefinition]) -> Result<Vec<RuntimeTool>, ProtocolError> {
+    if tools
+        .iter()
+        .any(|tool| !matches!(tool.kind, ToolKind::Function | ToolKind::Freeform))
+    {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidInput,
+            "unsupported nested tool kind",
+        ));
+    }
+    Ok(tools
+        .iter()
+        .map(|tool| RuntimeTool {
+            name: tool.code_mode_name.clone(),
+            description: tool.description.clone(),
+            deferred: tool.deferred,
+        })
+        .collect())
 }
 
 fn parse_params<T: DeserializeOwned>(params: Value) -> Result<T, ProtocolError> {

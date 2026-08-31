@@ -17,14 +17,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - run: rustup show
       - run: npm ci
-      - run: npm run format
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run coverage
-      - run: npm run dry
-      - run: npm run simpledoc
+      - run: npm run check
       - run: npm pack --dry-run
       - run: npm run mutate
       - run: npm run slophammer

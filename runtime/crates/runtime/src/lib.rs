@@ -56,9 +56,12 @@ pub struct RuntimeConfig {
     pub yield_tx: mpsc::UnboundedSender<YieldRequest>,
 }
 
+type ProgramCompletion = Pin<Box<dyn Future<Output = Result<(), String>>>>;
+
 pub struct RuntimeExecution {
     runtime: JsRuntime,
-    completion: Pin<Box<dyn Future<Output = Result<(), String>>>>,
+    source: Option<String>,
+    completion: Option<ProgramCompletion>,
     watchdog: CpuWatchdog,
     cpu_limit: Duration,
     memory_limit_hit: Arc<AtomicBool>,
@@ -124,20 +127,10 @@ impl RuntimeExecution {
         watchdog.disarm();
         initialized.map_err(|error| RuntimeError::Initialization(error.to_string()))?;
 
-        watchdog.arm(cpu_limit);
-        let promise =
-            runtime.execute_script("pi-code-mode:program", program_source(&config.source));
-        watchdog.disarm();
-        let promise = promise.map_err(|error| {
-            classify_start_error(&watchdog, &memory_limit_hit, error.to_string())
-        })?;
-        let completion = runtime
-            .resolve(promise)
-            .map(|result| result.map(|_| ()).map_err(|error| error.to_string()));
-
         Ok(Self {
             runtime,
-            completion: Box::pin(completion),
+            source: Some(config.source),
+            completion: None,
             watchdog,
             cpu_limit,
             memory_limit_hit,
@@ -162,6 +155,26 @@ impl RuntimeExecution {
         self.tool_calls.load(Ordering::Acquire)
     }
 
+    fn start_program(&mut self) -> Result<(), RuntimeError> {
+        let source = self.source.take().ok_or_else(|| {
+            RuntimeError::Initialization("program source is unavailable".to_owned())
+        })?;
+        self.watchdog.arm(self.cpu_limit);
+        let promise = self
+            .runtime
+            .execute_script("pi-code-mode:program", program_source(&source));
+        self.watchdog.disarm();
+        let promise = promise.map_err(|error| {
+            classify_start_error(&self.watchdog, &self.memory_limit_hit, error.to_string())
+        })?;
+        let completion = self
+            .runtime
+            .resolve(promise)
+            .map(|result| result.map(|_| ()).map_err(|error| error.to_string()));
+        self.completion = Some(Box::pin(completion));
+        Ok(())
+    }
+
     fn classify_error(&self, message: String) -> RuntimeError {
         if self.memory_limit_hit.load(Ordering::Acquire) {
             RuntimeError::MemoryLimit
@@ -180,7 +193,16 @@ impl Future for RuntimeExecution {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        if let Poll::Ready(result) = this.completion.as_mut().poll(context) {
+        if this.completion.is_none()
+            && let Err(error) = this.start_program()
+        {
+            return Poll::Ready(Err(error));
+        }
+        let completion = this
+            .completion
+            .as_mut()
+            .expect("program completion must exist after startup");
+        if let Poll::Ready(result) = completion.as_mut().poll(context) {
             return Poll::Ready(match result {
                 Ok(()) => Ok(()),
                 Err(message) if message.contains("__PI_CODE_MODE_EXIT__") => Ok(()),
@@ -198,7 +220,7 @@ impl Future for RuntimeExecution {
             if let Err(error) = result {
                 return Poll::Ready(Err(this.classify_error(error.to_string())));
             }
-            if let Poll::Ready(result) = this.completion.as_mut().poll(context) {
+            if let Poll::Ready(result) = completion.as_mut().poll(context) {
                 return Poll::Ready(match result {
                     Ok(()) => Ok(()),
                     Err(message) if message.contains("__PI_CODE_MODE_EXIT__") => Ok(()),

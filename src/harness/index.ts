@@ -6,6 +6,7 @@ import type {
   AgentSessionRuntime,
   AgentSessionRuntimeDiagnostic,
   CreateAgentSessionRuntimeFactory,
+  ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
 import {
   createAgentSession,
@@ -22,33 +23,47 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { CODE_MODE_SYSTEM_PROMPT } from "../core/prompt.js";
-import type { SandboxLimits } from "../core/types.js";
-import { createCodeModeExtension } from "../extension/index.js";
+import type { CodeModeLimits } from "../core/types.js";
+import { createCodeModeExtension, createManagedCodeModeExtension } from "../extension/index.js";
+import type { CodeModeExtensionOptions } from "../extension/index.js";
+import type { HostProcessOptions } from "../host/process.js";
 import { getCodeModeConfigPath } from "./config.js";
+
+function extensionOptions(options: {
+  limits?: Partial<CodeModeLimits>;
+  hostProcess?: HostProcessOptions;
+}): CodeModeExtensionOptions {
+  return {
+    ...(options.limits === undefined ? {} : { limits: options.limits }),
+    ...(options.hostProcess === undefined ? {} : { hostProcess: options.hostProcess }),
+  };
+}
 
 export type CreateCodeModeHarnessOptions = {
   provider: string;
   model: string;
   cwd: string;
   apiKey?: string;
-  limits?: Partial<SandboxLimits>;
+  limits?: Partial<CodeModeLimits>;
+  hostProcess?: HostProcessOptions;
 };
 
 export type CodeModeHarness = {
   session: AgentSession;
   warning?: string;
-  dispose: () => void;
+  dispose: () => Promise<void>;
 };
 
 export type CreateCodeModeResourceLoaderOptions = Pick<
   CreateCodeModeHarnessOptions,
-  "cwd" | "limits"
+  "cwd" | "hostProcess" | "limits"
 > & {
   agentDir?: string;
 };
 
-export async function createCodeModeResourceLoader(
+async function loadCodeModeResources(
   options: CreateCodeModeResourceLoaderOptions,
+  extension: ExtensionFactory,
 ): Promise<DefaultResourceLoader> {
   const resourceLoader = new DefaultResourceLoader({
     cwd: options.cwd,
@@ -60,11 +75,7 @@ export async function createCodeModeResourceLoader(
     noThemes: true,
     noContextFiles: true,
     systemPrompt: CODE_MODE_SYSTEM_PROMPT,
-    extensionFactories: [
-      createCodeModeExtension({
-        ...(options.limits === undefined ? {} : { limits: options.limits }),
-      }),
-    ],
+    extensionFactories: [extension],
     skillsOverride: () => ({ skills: [], diagnostics: [] }),
     promptsOverride: () => ({ prompts: [], diagnostics: [] }),
     themesOverride: () => ({ themes: [], diagnostics: [] }),
@@ -73,6 +84,12 @@ export async function createCodeModeResourceLoader(
   });
   await resourceLoader.reload();
   return resourceLoader;
+}
+
+export async function createCodeModeResourceLoader(
+  options: CreateCodeModeResourceLoaderOptions,
+): Promise<DefaultResourceLoader> {
+  return loadCodeModeResources(options, createCodeModeExtension(extensionOptions(options)));
 }
 
 async function createModelRuntime(provider: string, apiKey?: string): Promise<ModelRuntime> {
@@ -96,11 +113,16 @@ export async function createCodeModeHarness(
   }
 
   const agentDir = getAgentDir();
-  const resourceLoader = await createCodeModeResourceLoader({
-    cwd: options.cwd,
-    agentDir,
-    ...(options.limits === undefined ? {} : { limits: options.limits }),
-  });
+  const managedExtension = createManagedCodeModeExtension(extensionOptions(options));
+  const resourceLoader = await loadCodeModeResources(
+    {
+      cwd: options.cwd,
+      agentDir,
+      ...(options.limits === undefined ? {} : { limits: options.limits }),
+      ...(options.hostProcess === undefined ? {} : { hostProcess: options.hostProcess }),
+    },
+    managedExtension.extension,
+  );
   const settingsManager = SettingsManager.inMemory({
     compaction: { enabled: false },
     retry: { enabled: true, maxRetries: 2 },
@@ -112,7 +134,7 @@ export async function createCodeModeHarness(
     thinkingLevel: resolved.thinkingLevel ?? "off",
     modelRuntime,
     resourceLoader,
-    tools: ["exec"],
+    tools: ["exec", "wait"],
     sessionManager: SessionManager.inMemory(options.cwd),
     settingsManager,
   });
@@ -120,8 +142,9 @@ export async function createCodeModeHarness(
   return {
     session,
     ...(resolved.warning === undefined ? {} : { warning: resolved.warning }),
-    dispose: () => {
+    dispose: async () => {
       session.dispose();
+      await managedExtension.shutdown();
     },
   };
 }
@@ -152,7 +175,7 @@ export async function runCodeModePrompt(options: RunCodeModePromptOptions): Prom
     return output;
   } finally {
     unsubscribe();
-    harness.dispose();
+    await harness.dispose();
   }
 }
 
@@ -162,7 +185,8 @@ export type CreateCodeModeRuntimeOptions = {
   cwd: string;
   agentDir?: string;
   apiKey?: string;
-  limits?: Partial<SandboxLimits>;
+  limits?: Partial<CodeModeLimits>;
+  hostProcess?: HostProcessOptions;
 };
 
 export async function createCodeModeRuntime(
@@ -170,9 +194,7 @@ export async function createCodeModeRuntime(
 ): Promise<AgentSessionRuntime> {
   const agentDir = options.agentDir ?? dirname(getCodeModeConfigPath());
   const modelRuntime = await createModelRuntime(options.provider, options.apiKey);
-  const extension = createCodeModeExtension({
-    ...(options.limits === undefined ? {} : { limits: options.limits }),
-  });
+  const extension = createCodeModeExtension(extensionOptions(options));
 
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({
     cwd,
@@ -224,7 +246,7 @@ export async function createCodeModeRuntime(
         ...(sessionStartEvent === undefined ? {} : { sessionStartEvent }),
         model: resolved.model,
         thinkingLevel: resolved.thinkingLevel ?? "off",
-        tools: ["exec"],
+        tools: ["exec", "wait"],
       })),
       services,
       diagnostics,

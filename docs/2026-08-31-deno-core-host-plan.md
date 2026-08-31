@@ -250,13 +250,13 @@ The revision identifiers make the comparison reproducible. The links below use e
 
 ### Summary
 
-| Implementation | Model-visible surface | Guest runtime | Long-running cells | Ambient host authority | Nested tool boundary |
-| --- | --- | --- | --- | --- | --- |
-| OpenAI Codex | Raw-source `exec` and structured `wait` | Rust host with sandbox-enabled V8 through `rusty_v8` | Live isolate pauses and resumes | No Node, filesystem, network, console, or module access | Calls return to the Codex session delegate |
-| OpenClaw | Structured `exec` and `wait`, plus required direct-only tools | QuickJS-WASI in a Node.js worker thread | QuickJS snapshots are stored and restored | No filesystem, network, process, environment, or modules | Calls return to the normal OpenClaw tool executor |
-| OpenCode | One structured `execute` tool | Owned TypeScript tree-walking interpreter over an Acorn AST | No `wait`; each program is one-shot | No ambient host APIs because unsupported syntax and globals are never implemented | Generic explicit tool tree; current adapter exposes MCP tools |
-| OMP | `eval` plus a direct keep-set such as `ask`, `todo`, and `yield` | Persistent language kernels; JavaScript runs under Bun | Kernel state persists; generic background jobs replace a Code Mode `wait` protocol | Broad Bun, filesystem, shell, network, process, and module authority | Enabled session tools are bridged through `tool.<name>()` |
-| This plan | Raw JavaScript `exec` and structured `wait` | Separate Rust `deno_core` and V8 host process | Live isolate pauses and resumes | No Deno, Node, filesystem, network, process, environment, or modules | Calls return to a frozen TypeScript broker owned by Pi |
+| Implementation | Model-visible surface                                            | Guest runtime                                               | Long-running cells                                                                 | Ambient host authority                                                            | Nested tool boundary                                          |
+| -------------- | ---------------------------------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| OpenAI Codex   | Raw-source `exec` and structured `wait`                          | Rust host with sandbox-enabled V8 through `rusty_v8`        | Live isolate pauses and resumes                                                    | No Node, filesystem, network, console, or module access                           | Calls return to the Codex session delegate                    |
+| OpenClaw       | Structured `exec` and `wait`, plus required direct-only tools    | QuickJS-WASI in a Node.js worker thread                     | QuickJS snapshots are stored and restored                                          | No filesystem, network, process, environment, or modules                          | Calls return to the normal OpenClaw tool executor             |
+| OpenCode       | One structured `execute` tool                                    | Owned TypeScript tree-walking interpreter over an Acorn AST | No `wait`; each program is one-shot                                                | No ambient host APIs because unsupported syntax and globals are never implemented | Generic explicit tool tree; current adapter exposes MCP tools |
+| OMP            | `eval` plus a direct keep-set such as `ask`, `todo`, and `yield` | Persistent language kernels; JavaScript runs under Bun      | Kernel state persists; generic background jobs replace a Code Mode `wait` protocol | Broad Bun, filesystem, shell, network, process, and module authority              | Enabled session tools are bridged through `tool.<name>()`     |
+| This plan      | Raw JavaScript `exec` and structured `wait`                      | Separate Rust `deno_core` and V8 host process               | Live isolate pauses and resumes                                                    | No Deno, Node, filesystem, network, process, environment, or modules              | Calls return to a frozen TypeScript broker owned by Pi        |
 
 The implementations solve related problems, but they do not have the same security or lifecycle contract. The name “Code Mode” alone does not establish that code is isolated, that tools are nested, or that a `wait` operation exists.
 
@@ -582,13 +582,13 @@ Sources:
 
 The comparison gives four different kinds of closeness.
 
-| Question | Closest implementation | Reason |
-| --- | --- | --- |
-| Which host and cell architecture is closest? | OpenAI Codex | Separate Rust host, V8 isolates, live cells, `exec`, `wait`, and parent delegates |
-| Which policy and catalog design is strongest? | OpenClaw | Run-scoped filtering, lazy discovery, direct-only tools, normal executor re-entry, and side-effect evidence |
-| Which implementation has the smallest language boundary? | OpenCode | No native JavaScript engine and only an owned syntax subset |
-| Which implementation is the most flexible coding environment? | OMP | Persistent multi-language kernels with broad host capabilities |
-| Which implementation best matches this product goal? | OpenAI Codex | The plan exists to provide Codex-like Code Mode in an ordinary Pi session |
+| Question                                                      | Closest implementation | Reason                                                                                                      |
+| ------------------------------------------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Which host and cell architecture is closest?                  | OpenAI Codex           | Separate Rust host, V8 isolates, live cells, `exec`, `wait`, and parent delegates                           |
+| Which policy and catalog design is strongest?                 | OpenClaw               | Run-scoped filtering, lazy discovery, direct-only tools, normal executor re-entry, and side-effect evidence |
+| Which implementation has the smallest language boundary?      | OpenCode               | No native JavaScript engine and only an owned syntax subset                                                 |
+| Which implementation is the most flexible coding environment? | OMP                    | Persistent multi-language kernels with broad host capabilities                                              |
+| Which implementation best matches this product goal?          | OpenAI Codex           | The plan exists to provide Codex-like Code Mode in an ordinary Pi session                                   |
 
 The intended result is not a line-for-line clone of one project. It combines:
 
@@ -1048,8 +1048,8 @@ Large catalogs will follow the Codex pattern:
 Example:
 
 ```js
-const matches = ALL_TOOLS.filter(({ name, description }) =>
-  name.includes("search") || description.includes("search")
+const matches = ALL_TOOLS.filter(
+  ({ name, description }) => name.includes("search") || description.includes("search"),
 );
 text(matches);
 ```
@@ -1080,7 +1080,7 @@ type CodeModeToolDescriptor = {
   invoke: (
     input: unknown,
     context: CodeModeInvocationContext,
-    signal: AbortSignal
+    signal: AbortSignal,
   ) => Promise<unknown>;
 };
 ```
@@ -1189,10 +1189,7 @@ Host stack objects and TypeScript error instances will never cross the protocol.
 The runtime must support:
 
 ```js
-const [a, b] = await Promise.all([
-  tools.read({ path: "a.txt" }),
-  tools.read({ path: "b.txt" }),
-]);
+const [a, b] = await Promise.all([tools.read({ path: "a.txt" }), tools.read({ path: "b.txt" })]);
 ```
 
 Each call will get a unique call ID.
@@ -1572,27 +1569,27 @@ Detailed host diagnostics will remain in bounded local logs and must not include
 
 The first implementation will use conservative defaults.
 
-| Limit | Initial value |
-| --- | ---: |
-| Source | 64 KiB |
-| V8 heap per cell | 64 MiB |
-| V8 thread stack | 2 MiB |
-| Active cells per session | 4 |
-| Active cells per host | 8 |
-| Tool calls per cell | 64 |
-| Concurrent tool calls per cell | 8 |
-| Input per nested call | 256 KiB |
-| Result per nested call | 1 MiB |
-| Total nested result data | 8 MiB |
-| Model output | 128 KiB |
-| Session store | 1 MiB |
-| Initial yield time | 10 seconds |
-| Active JavaScript CPU | 5 seconds |
-| Complete cell wall time | 5 minutes |
-| Yielded cell TTL | 15 minutes |
-| Terminal result retention | 60 seconds |
-| Protocol frame | 16 MiB |
-| Host shutdown grace | 5 seconds |
+| Limit                          | Initial value |
+| ------------------------------ | ------------: |
+| Source                         |        64 KiB |
+| V8 heap per cell               |        64 MiB |
+| V8 thread stack                |         2 MiB |
+| Active cells per session       |             4 |
+| Active cells per host          |             8 |
+| Tool calls per cell            |            64 |
+| Concurrent tool calls per cell |             8 |
+| Input per nested call          |       256 KiB |
+| Result per nested call         |         1 MiB |
+| Total nested result data       |         8 MiB |
+| Model output                   |       128 KiB |
+| Session store                  |         1 MiB |
+| Initial yield time             |    10 seconds |
+| Active JavaScript CPU          |     5 seconds |
+| Complete cell wall time        |     5 minutes |
+| Yielded cell TTL               |    15 minutes |
+| Terminal result retention      |    60 seconds |
+| Protocol frame                 |        16 MiB |
+| Host shutdown grace            |     5 seconds |
 
 These values are starting limits, not performance claims.
 
@@ -1870,7 +1867,7 @@ During implementation, the project must verify which built-in tool constructors 
 Full wrapping of arbitrary active tools would require a documented API similar to:
 
 ```typescript
-pi.invokeTool(name, input, context, signal)
+pi.invokeTool(name, input, context, signal);
 ```
 
 The project will not use Pi internals to simulate this API.
@@ -2127,15 +2124,15 @@ Tests will prove:
 The suite will include attempts to access:
 
 ```js
-globalThis.process
-globalThis.require
-globalThis.Deno
-globalThis.fetch
-globalThis.WebSocket
-globalThis.XMLHttpRequest
-globalThis.WebAssembly
-globalThis.SharedArrayBuffer
-globalThis.Atomics
+globalThis.process;
+globalThis.require;
+globalThis.Deno;
+globalThis.fetch;
+globalThis.WebSocket;
+globalThis.XMLHttpRequest;
+globalThis.WebAssembly;
+globalThis.SharedArrayBuffer;
+globalThis.Atomics;
 ```
 
 It will also attempt:

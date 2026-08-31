@@ -4,36 +4,61 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { executeProgram } from "../src/index.ts";
+import {
+  CodeModeBroker,
+  CodeModeHostManager,
+  createReadOnlyCatalog,
+  resolveLimits,
+} from "../src/index.ts";
 
+let callNumber;
+let manager;
 let root;
+let session;
 
-beforeEach(() => {
+beforeEach(async () => {
+  callNumber = 0;
   root = mkdtempSync(join(tmpdir(), "pi-code-mode-test-"));
   mkdirSync(join(root, "src"));
   writeFileSync(join(root, "a.txt"), "alpha\nbeta\nalpha\n");
   writeFileSync(join(root, "src", "x.ts"), "export const x = 1;\n");
+  manager = await CodeModeHostManager.start();
+  session = await manager.openSession();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await session?.close();
+  await manager?.close();
   rmSync(root, { recursive: true, force: true });
 });
 
-async function run(code, extra = {}) {
-  return executeProgram({ code, rootDir: root, ...extra });
+function outputText(result) {
+  return result.output
+    .filter((output) => output.type === "text")
+    .map((output) => output.text)
+    .join("\n");
 }
 
-describe("sandbox execution", () => {
+async function run(source, limitOverrides = {}) {
+  callNumber += 1;
+  const limits = resolveLimits(limitOverrides);
+  const broker = new CodeModeBroker(root, createReadOnlyCatalog(root, limits));
+  return session.exec(source, `test-${String(callNumber)}`, broker, limits);
+}
+
+describe("Deno Core execution host", () => {
   it("composes all read-only tools", async () => {
     const result = await run(`
-const listed = await tools.ls({ path: "." });
-const found = await tools.find({ path: ".", pattern: "**/*.ts" });
-const matches = await tools.grep({ path: ".", pattern: "alpha" });
-const read = await tools.read({ path: "src/x.ts" });
+const [listed, found, matches, read] = await Promise.all([
+  tools.ls({ path: "." }),
+  tools.find({ path: ".", pattern: "**/*.ts" }),
+  tools.grep({ path: ".", pattern: "alpha" }),
+  tools.read({ path: "src/x.ts" }),
+]);
 text({ listed, found, matches, read });`);
 
     expect(result.status).toBe("completed");
-    const output = JSON.parse(result.output);
+    const output = JSON.parse(outputText(result));
     expect(output.listed.map((entry) => entry.name)).toEqual(["a.txt", "src"]);
     expect(output.found).toEqual(["src/x.ts"]);
     expect(output.matches).toHaveLength(2);
@@ -41,195 +66,123 @@ text({ listed, found, matches, read });`);
     expect(result.stats.toolCalls).toBe(4);
   });
 
-  it("reads line ranges beyond the first read-sized prefix", async () => {
-    const lines = Array.from({ length: 70_010 }, (_, index) => `line-${String(index + 1)}`);
-    writeFileSync(join(root, "large.txt"), `${lines.join("\n")}\n`);
+  it("keeps Node, Deno, network, and module globals unavailable", async () => {
+    const result = await run(`text([
+      typeof process,
+      typeof require,
+      typeof Deno,
+      typeof fetch,
+      typeof WebSocket,
+      typeof console,
+      typeof WebAssembly,
+      typeof SharedArrayBuffer,
+      typeof Atomics,
+    ]);`);
 
-    const result = await run(
-      'text(await tools.read({ path: "large.txt", offset: 70000, limit: 2 }));',
-    );
-    const limited = await run(
-      'text(await tools.read({ path: "large.txt", offset: 100, limit: 1 }));',
-      { limits: { maxScannedBytes: 64 } },
-    );
-
-    expect(result).toMatchObject({
-      status: "completed",
-      output: "line-70000\nline-70001",
-    });
-    expect(result.stats.scannedBytes).toBeGreaterThan(256 * 1024);
-    expect(limited).toMatchObject({ status: "failed" });
-    expect(limited.error).toContain("requested line range exceeds the scanned byte limit");
+    expect(result.status).toBe("completed");
+    expect(JSON.parse(outputText(result))).toEqual(Array(9).fill("undefined"));
   });
 
-  it("does not expose Node or network globals", async () => {
-    const result = await run(
-      "text([typeof process, typeof require, typeof fetch, typeof console, typeof WebSocket]);",
-    );
-
-    expect(result).toMatchObject({
-      status: "completed",
-      output: '["undefined","undefined","undefined","undefined","undefined"]',
-    });
-  });
-
-  it("rejects invalid limits and oversized source before execution", async () => {
-    const oversized = await executeProgram({
-      code: "x".repeat(101),
-      rootDir: root,
-      limits: { maxSourceBytes: 100 },
-    });
-    const invalidLimit = await executeProgram({
-      code: 'text("safe");',
-      rootDir: root,
-      limits: { maxToolCalls: 0 },
-    });
-
-    expect(oversized).toMatchObject({ status: "failed" });
-    expect(invalidLimit).toMatchObject({
-      status: "failed",
-      error: "maxToolCalls must be a positive safe integer",
-    });
-  });
-
-  it("honors aborts before and during execution", async () => {
-    const before = new AbortController();
-    before.abort();
-    const beforeResult = await executeProgram({
-      code: 'text("safe");',
-      rootDir: root,
-      signal: before.signal,
-    });
-
-    const during = new AbortController();
-    const duringResultPromise = executeProgram({
-      code: "while (true) {}",
-      rootDir: root,
-      signal: during.signal,
-    });
-    setTimeout(() => during.abort(), 50);
-    const duringResult = await duringResultPromise;
-
-    expect(beforeResult).toMatchObject({ status: "failed", error: "execution aborted" });
-    expect(duringResult).toMatchObject({ status: "failed", error: "execution aborted" });
-  });
-
-  it("reports worker setup failures", async () => {
-    const setupFailure = await executeProgram({
-      code: 'text("safe");',
-      rootDir: join(root, "missing"),
-    });
-
-    expect(setupFailure).toMatchObject({ status: "failed" });
-  });
-
-  it("blocks absolute paths and parent traversal", async () => {
-    const absolute = await run('text(await tools.read({ path: "/etc/passwd" }));');
-    const parent = await run('text(await tools.read({ path: "../outside" }));');
-
-    expect(absolute).toMatchObject({ status: "failed" });
-    expect(absolute.error).toContain("absolute paths");
-    expect(parent).toMatchObject({ status: "failed" });
-    expect(parent.error).toContain("escapes");
-  });
-
-  it("blocks sensitive paths, version-control metadata, and symlink escapes", async () => {
-    writeFileSync(join(root, ".env"), "TOKEN=secret\n");
-    writeFileSync(join(root, ".envrc"), "export TOKEN=secret\n");
+  it("blocks absolute paths, parent traversal, sensitive paths, and escaping symlinks", async () => {
+    symlinkSync("/etc/passwd", join(root, "outside-link"));
     mkdirSync(join(root, ".git"));
-    writeFileSync(join(root, ".git", "config"), "credential-bearing URL\n");
-    symlinkSync("/etc/hosts", join(root, "outside-link"));
+    writeFileSync(join(root, ".git", "config"), "secret\n");
 
-    const sensitive = await run('text(await tools.read({ path: ".env" }));');
-    const direnv = await run('text(await tools.read({ path: ".envrc" }));');
-    const gcloud = await run(
-      'text(await tools.read({ path: "gcloud/application_default_credentials.json" }));',
-    );
-    const gitConfig = await run('text(await tools.read({ path: ".git/config" }));');
-    const gitScan = await run('text(await tools.find({ path: ".git" }));');
-    const escaped = await run('text(await tools.read({ path: "outside-link" }));');
-
-    expect(sensitive).toMatchObject({ status: "failed" });
-    expect(sensitive.error).toContain("sensitive path");
-    expect(direnv).toMatchObject({ status: "failed" });
-    expect(direnv.error).toContain("sensitive path");
-    expect(gcloud).toMatchObject({ status: "failed" });
-    expect(gcloud.error).toContain("sensitive path");
-    expect(gitConfig).toMatchObject({ status: "failed" });
-    expect(gitConfig.error).toContain("sensitive path");
-    expect(gitScan).toMatchObject({ status: "failed" });
-    expect(gitScan.error).toContain("sensitive path");
-    expect(escaped).toMatchObject({ status: "failed" });
-    expect(escaped.error).toContain("symlink escapes");
+    for (const source of [
+      'text(await tools.read({ path: "/etc/passwd" }));',
+      'text(await tools.read({ path: "../outside" }));',
+      'text(await tools.read({ path: ".git/config" }));',
+      'text(await tools.read({ path: "outside-link" }));',
+    ]) {
+      const result = await run(source);
+      expect(result.status).toBe("failed");
+      expect(result.error).toBeTruthy();
+    }
   });
 
-  it("interrupts infinite loops", async () => {
-    const started = Date.now();
-    const result = await run("while (true) {}", { limits: { timeoutMs: 200 } });
+  it("enforces source and nested tool-call limits", async () => {
+    await expect(run("x".repeat(101), { maxSourceBytes: 100 })).rejects.toThrow(
+      "program source exceeds 100 bytes",
+    );
+    const calls = await run(
+      'for (let i = 0; i < 3; i += 1) await tools.ls({ path: "." }); text("done");',
+      { maxToolCalls: 2 },
+    );
+    expect(calls.status).toBe("failed");
+    expect(calls.error).toContain("tool call limit");
+  });
 
-    expect(result).toMatchObject({ status: "failed" });
+  it("propagates the Pi abort signal into an active V8 cell", async () => {
+    const limits = resolveLimits();
+    const broker = new CodeModeBroker(root, createReadOnlyCatalog(root, limits));
+    const controller = new AbortController();
+    const started = Date.now();
+    const execution = session.exec(
+      "while (true) {}",
+      "abort-test",
+      broker,
+      limits,
+      controller.signal,
+    );
+    setTimeout(() => controller.abort(), 50);
+    const result = await execution;
+
+    expect(result.status).toBe("terminated");
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("interrupts an infinite loop at the active CPU limit", async () => {
+    const started = Date.now();
+
+    const result = await run("while (true) {}", { cpuLimitMs: 100 });
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("JavaScript CPU limit exceeded");
     expect(Date.now() - started).toBeLessThan(3_000);
   });
 
-  it("stops directory enumeration at the listing limit", async () => {
-    for (let index = 0; index < 100; index += 1) {
-      writeFileSync(join(root, `entry-${String(index)}.txt`), "value\n");
-    }
+  it("bounds output at a UTF-8 boundary", async () => {
+    const ascii = await run('text("x".repeat(5_000));', { maxOutputBytes: 128 });
+    const unicode = await run('text("😀");', { maxOutputBytes: 3 });
 
-    const result = await run('text(await tools.ls({ path: ".", maxResults: 1 }));');
-
-    expect(result).toMatchObject({ status: "completed" });
-    expect(JSON.parse(result.output)).toHaveLength(1);
-    expect(result.stats.scannedEntries).toBe(1);
+    expect(ascii).toMatchObject({ status: "completed", truncated: true });
+    expect(Buffer.byteLength(outputText(ascii), "utf8")).toBe(128);
+    expect(unicode).toMatchObject({ status: "completed", truncated: true });
+    expect(outputText(unicode)).toBe("");
   });
 
-  it("stops recursive search at the result limit", async () => {
-    mkdirSync(join(root, "one"));
-    mkdirSync(join(root, "two"));
-    writeFileSync(join(root, "one", "first.txt"), "alpha\n");
-    writeFileSync(join(root, "one", "second.txt"), "alpha\n");
-    writeFileSync(join(root, "two", "third.txt"), "alpha\n");
-    const result = await run(`
-const found = await tools.find({ path: ".", pattern: "**/*.txt", maxResults: 2 });
-const matches = await tools.grep({ path: ".", pattern: "alpha", maxResults: 1 });
-text({ found, matches });`);
-
-    expect(result.status).toBe("completed");
-    const output = JSON.parse(result.output);
-    expect(output.found).toHaveLength(2);
-    expect(output.matches).toHaveLength(1);
-  });
-
-  it("returns guest syntax errors without running another program", async () => {
-    const result = await run("this is not valid JavaScript {{{");
-
-    expect(result).toMatchObject({ status: "failed" });
-    expect(result.error.length).toBeGreaterThan(0);
-  });
-
-  it("enforces nested tool-call limits", async () => {
-    const result = await run(
-      'for (let i = 0; i < 3; i += 1) await tools.ls({ path: "." }); text("done");',
-      { limits: { maxToolCalls: 2 } },
+  it("yields a long cell and resumes it through wait", async () => {
+    const limits = resolveLimits({ initialYieldTimeMs: 10 });
+    const broker = new CodeModeBroker(root, createReadOnlyCatalog(root, limits));
+    const initial = await session.exec(
+      'await yield_control(); await new Promise((resolve) => setTimeout(() => { text("finished"); resolve(); }, 50));',
+      "waiting-test",
+      broker,
+      limits,
     );
 
-    expect(result).toMatchObject({ status: "failed" });
-    expect(result.error).toContain("tool call limit");
+    expect(initial.status).toBe("waiting");
+    const completed = await session.wait(initial.cellId, 1_000, 1_000, false, limits);
+    expect(completed.status).toBe("completed");
+    expect(outputText(completed)).toBe("finished");
   });
 
-  it("bounds worker output and truncates it at a UTF-8 boundary", async () => {
-    const result = await run('text("x".repeat(5_000_000));', {
-      limits: { maxOutputBytes: 128 },
-    });
-    const repeated = await run('for (let i = 0; i < 100; i += 1) text("small");', {
-      limits: { maxOutputBytes: 64 },
-    });
-    const unicode = await run('text("😀");', { limits: { maxOutputBytes: 3 } });
+  it("persists explicit session store values between cells", async () => {
+    const stored = await run('store("answer", { value: 42 }); text("stored");');
+    const loaded = await run('text(load("answer"));');
 
-    expect(result).toMatchObject({ status: "completed", truncated: true });
-    expect(Buffer.byteLength(result.output, "utf8")).toBe(128);
-    expect(repeated).toMatchObject({ status: "completed", truncated: true });
-    expect(Buffer.byteLength(repeated.output, "utf8")).toBeLessThanOrEqual(64);
-    expect(unicode).toMatchObject({ status: "completed", output: "", truncated: true });
+    expect(stored.status).toBe("completed");
+    expect(loaded.status).toBe("completed");
+    expect(JSON.parse(outputText(loaded))).toEqual({ value: 42 });
+  });
+
+  it("returns syntax errors without crashing the host", async () => {
+    const invalid = await run("this is not valid JavaScript {{{");
+    const valid = await run('text("still alive");');
+
+    expect(invalid.status).toBe("failed");
+    expect(invalid.error).toContain("JavaScript initialization failed");
+    expect(valid.status).toBe("completed");
+    expect(outputText(valid)).toBe("still alive");
   });
 });

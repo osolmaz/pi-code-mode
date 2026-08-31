@@ -37,10 +37,15 @@ pub struct CellHandle {
     terminate_handle: TerminateHandle,
     observing: Arc<AtomicBool>,
     counted: Arc<AtomicBool>,
+    termination_requested: Arc<AtomicBool>,
 }
 
 impl CellHandle {
     pub async fn observe(&self, options: ObserveOptions) -> Result<CellResult, ProtocolError> {
+        if options.terminate {
+            self.termination_requested.store(true, Ordering::Release);
+            let _ = self.terminate_handle.terminate_execution();
+        }
         if self
             .observing
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -78,6 +83,7 @@ impl CellHandle {
     }
 
     pub fn terminate(&self) {
+        self.termination_requested.store(true, Ordering::Release);
         let _ = self.terminate_handle.terminate_execution();
         let _ = self.commands.send(CellCommand::Terminate);
     }
@@ -98,12 +104,16 @@ pub fn spawn_cell(config: CellSpawnConfig) -> Result<CellHandle, ProtocolError> 
     let id = config.id.clone();
     let observing = Arc::new(AtomicBool::new(false));
     let counted = Arc::new(AtomicBool::new(true));
+    let termination_requested = Arc::new(AtomicBool::new(false));
+    let actor_termination_requested = Arc::clone(&termination_requested);
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
     thread::Builder::new()
         .name(format!("pi-code-mode-cell-{id}"))
         .stack_size(2 * 1024 * 1024)
-        .spawn(move || run_cell_thread(config, command_rx, ready_tx))
+        .spawn(move || {
+            run_cell_thread(config, command_rx, ready_tx, actor_termination_requested);
+        })
         .map_err(|error| {
             ProtocolError::new(
                 ErrorCode::RuntimeUnavailable,
@@ -121,6 +131,7 @@ pub fn spawn_cell(config: CellSpawnConfig) -> Result<CellHandle, ProtocolError> 
         terminate_handle,
         observing,
         counted,
+        termination_requested,
     })
 }
 
@@ -128,6 +139,7 @@ fn run_cell_thread(
     config: CellSpawnConfig,
     command_rx: mpsc::UnboundedReceiver<CellCommand>,
     ready: std_mpsc::SyncSender<Result<TerminateHandle, ProtocolError>>,
+    termination_requested: Arc<AtomicBool>,
 ) {
     let tokio = match tokio::runtime::Builder::new_current_thread()
         .enable_time()
@@ -167,6 +179,7 @@ fn run_cell_thread(
             command_rx,
             yield_rx,
             config.wall_time_ms,
+            termination_requested,
         )
         .await;
     });
@@ -186,6 +199,7 @@ async fn run_actor(
     mut commands: mpsc::UnboundedReceiver<CellCommand>,
     mut yields: mpsc::UnboundedReceiver<YieldRequest>,
     wall_time_ms: u64,
+    termination_requested: Arc<AtomicBool>,
 ) {
     let started = Instant::now();
     let wall_deadline = tokio::time::Instant::now() + Duration::from_millis(wall_time_ms);
@@ -243,6 +257,7 @@ async fn run_actor(
             result = execution.as_mut() => {
                 terminal = Some(match result {
                     Ok(()) => TerminalState::Completed,
+                    Err(_) if termination_requested.load(Ordering::Acquire) => TerminalState::Terminated,
                     Err(error) => TerminalState::Failed(error.to_string()),
                 });
                 if let (Some(observer), Some(state)) = (observer.take(), terminal.as_ref()) {

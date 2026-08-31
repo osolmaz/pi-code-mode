@@ -22,7 +22,7 @@ type CliArguments = {
 
 const HELP = `Usage: pi-code-mode [options] [prompt]
 
-Runs Pi's standard interactive TUI with only the Code Mode exec tool.
+Runs Pi's standard interactive TUI with the Code Mode exec and wait tools.
 A prompt argument becomes the initial message.
 
 Options:
