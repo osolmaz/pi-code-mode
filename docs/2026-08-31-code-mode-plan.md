@@ -471,12 +471,14 @@ Limits apply at four levels.
 
 ### Command limits
 
-- process count;
-- memory;
-- runtime;
-- output;
-- input writes;
-- idle lifetime.
+- at most eight concurrently active command workers per harness by default;
+- a 30-minute wall-clock lifetime for each command by default;
+- a worker-local process and thread limit;
+- CPU, memory, file-size, and open-file limits;
+- output and input-write limits;
+- process-group `SIGTERM` followed by guaranteed `SIGKILL` escalation after two seconds.
+
+The manager keeps the escalation timer referenced and targets the process group even if the original worker exits first. This prevents a detached descendant that ignores `SIGTERM` from surviving Pi shutdown.
 
 ### Host limits
 
