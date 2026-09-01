@@ -109,7 +109,6 @@ function appendCommandStatus(text: string, status: string): string {
 function createSandboxedBashTool(
   workspace: WorkspaceSandbox,
   processes: SandboxedProcessManager,
-  memoryLimitBytes?: number,
 ): PiTool {
   return {
     name: "bash",
@@ -140,7 +139,6 @@ function createSandboxedBashTool(
           },
           ...(signal === undefined ? {} : { signal }),
           ...(input.timeout === undefined ? {} : { timeout: input.timeout }),
-          ...(memoryLimitBytes === undefined ? {} : { memoryLimitBytes }),
         });
       } catch (error) {
         const snapshot = output.snapshot();
@@ -176,7 +174,7 @@ function createSandboxedPowerShellTool(
   workspace: WorkspaceSandbox,
   processes: SandboxedProcessManager,
 ): PiTool {
-  const bash = createSandboxedBashTool(workspace, processes, 8 * 1024 * 1024 * 1024);
+  const bash = createSandboxedBashTool(workspace, processes);
   return {
     ...bash,
     name: "powershell",
@@ -184,7 +182,8 @@ function createSandboxedPowerShellTool(
     execute(callId, rawInput, signal) {
       const input = rawInput as unknown as { command: string; timeout?: number };
       const command = `command -v pwsh >/dev/null || { printf '%s\\n' 'PowerShell is not installed' >&2; exit 127; }
-DOTNET_EnableDiagnostics=0 DOTNET_GCHeapHardLimit=0x20000000 DOTNET_GCRegionRange=0x40000000 pwsh -NoProfile -NonInteractive -Command ${shellQuote(input.command)} || { status=$?; if [ "$status" -eq 126 ]; then printf '%s\\n' 'PowerShell is not installed or is unavailable in the sandbox' >&2; exit 127; fi; exit "$status"; }`;
+pwsh -NoProfile -NonInteractive -Command 'exit 0' >/dev/null 2>&1 || { printf '%s\\n' 'PowerShell is installed but is unavailable in the sandbox' >&2; exit 127; }
+exec pwsh -NoProfile -NonInteractive -Command ${shellQuote(input.command)}`;
       return bash.execute(callId, { ...input, command } as never, signal);
     },
   };

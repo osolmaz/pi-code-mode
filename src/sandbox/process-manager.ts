@@ -1,9 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { readFileSync, readdirSync } from "node:fs";
 import type { Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 
 import { resolveHostBinary } from "../host/binary.js";
-import { boundedInteger, currentUserProcessLimit, tokenLimit } from "./process-limits.js";
 import type { WorkspaceSandbox } from "./workspace.js";
 
 const DEFAULT_EXEC_YIELD_MS = 10_000;
@@ -11,6 +11,8 @@ const DEFAULT_POLL_MS = 5_000;
 const DEFAULT_WRITE_YIELD_MS = 250;
 const MIN_YIELD_MS = 250;
 const MAX_YIELD_MS = 30_000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
+const MAX_MAX_OUTPUT_TOKENS = 100_000;
 const MAX_TOTAL_OUTPUT_BYTES = 8 * 1024 * 1024;
 const SCRATCH_CHECK_INTERVAL_MS = 25;
 const MAX_INPUT_BYTES = 1024 * 1024;
@@ -77,6 +79,51 @@ export type SandboxedProcessManagerOptions = {
   wallTimeLimitMs?: number;
   maxActiveProcesses?: number;
 };
+
+function boundedInteger(
+  value: unknown,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  field: string,
+): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+    throw new Error(`${field} must be an integer from ${String(minimum)} to ${String(maximum)}`);
+  }
+  return value as number;
+}
+
+// Linux counts every user thread against RLIMIT_NPROC, including threads outside this process.
+// eslint-disable-next-line complexity
+function currentUserProcessLimit(headroom = 64): number {
+  if (process.platform !== "linux" || process.getuid === undefined) return 512;
+  const uid = process.getuid();
+  let count = 0;
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/u.test(entry)) continue;
+    try {
+      const status = readFileSync(`/proc/${entry}/status`, "utf8");
+      const match = /^Uid:\s+(\d+)/mu.exec(status);
+      if (match?.[1] !== undefined && Number(match[1]) === uid) {
+        count += readdirSync(`/proc/${entry}/task`).length;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return Math.max(128, count + headroom);
+}
+
+function tokenLimit(value: number | undefined): number {
+  return boundedInteger(
+    value,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    1,
+    MAX_MAX_OUTPUT_TOKENS,
+    "max_output_tokens",
+  );
+}
 
 function outputSlice(
   process: ManagedProcess,
@@ -151,16 +198,8 @@ export class SandboxedProcessManager {
     input: ExecCommandInput,
     signal?: AbortSignal,
     onData?: (data: Buffer) => void,
-    memoryLimitBytes = this.#options.memoryLimitBytes,
   ): Promise<CommandResult> {
     this.#assertOpen();
-    memoryLimitBytes = boundedInteger(
-      memoryLimitBytes,
-      this.#options.memoryLimitBytes,
-      1024 * 1024,
-      64 * 1024 * 1024 * 1024,
-      "memoryLimitBytes",
-    );
     signal?.throwIfAborted();
     if (typeof input.cmd !== "string" || input.cmd.length === 0) {
       throw new Error("cmd must be a non-empty string");
@@ -176,13 +215,7 @@ export class SandboxedProcessManager {
     if (!this.#workspace.stat(workdir.absolute).isDirectory()) {
       throw new Error("workdir must be a directory");
     }
-    const managed = this.#spawn(
-      input.cmd,
-      workdir.absolute,
-      input.tty ?? false,
-      onData,
-      memoryLimitBytes,
-    );
+    const managed = this.#spawn(input.cmd, workdir.absolute, input.tty ?? false, onData);
     const onAbort = (): void => {
       this.#terminate(managed);
     };
@@ -209,12 +242,7 @@ export class SandboxedProcessManager {
   async runOneShot(
     command: string,
     cwd: string,
-    options: {
-      onData: (data: Buffer) => void;
-      signal?: AbortSignal;
-      timeout?: number;
-      memoryLimitBytes?: number;
-    },
+    options: { onData: (data: Buffer) => void; signal?: AbortSignal; timeout?: number },
   ): Promise<{ exitCode: number | null }> {
     const timeoutSignal =
       options.timeout === undefined
@@ -229,7 +257,6 @@ export class SandboxedProcessManager {
         { cmd: command, workdir: cwd, tty: false, yield_time_ms: MAX_YIELD_MS },
         signal,
         options.onData,
-        options.memoryLimitBytes,
       );
       while (result.session_id !== undefined) {
         result = await this.write(
@@ -299,8 +326,7 @@ export class SandboxedProcessManager {
     command: string,
     cwd: string,
     tty: boolean,
-    onData: ((data: Buffer) => void) | undefined,
-    memoryLimitBytes: number,
+    onData?: (data: Buffer) => void,
   ): ManagedProcess {
     const activeProcesses = [...this.#processes.values()].filter(
       (process) => !process.closed,
@@ -318,7 +344,7 @@ export class SandboxedProcessManager {
       scratch: this.#workspace.scratch,
       tty,
       cpuLimitSeconds: this.#options.cpuLimitSeconds,
-      memoryLimitBytes,
+      memoryLimitBytes: this.#options.memoryLimitBytes,
       fileSizeLimitBytes: this.#options.fileSizeLimitBytes,
       openFileLimit: this.#options.openFileLimit,
       processLimit: this.#options.processLimit,
