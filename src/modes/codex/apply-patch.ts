@@ -1,4 +1,4 @@
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 
 import type { WorkspaceSandbox } from "../../sandbox/workspace.js";
 
@@ -129,7 +129,7 @@ function replaceHunks(content: string, operation: UpdateOperation): string {
   return trailingNewline ? `${result}\n` : result;
 }
 
-type Snapshot = { path: string; existed: boolean; content?: Buffer };
+type Snapshot = { path: string; existed: boolean; content?: Buffer; mode?: number };
 
 export async function applyPatch(workspace: WorkspaceSandbox, source: string): Promise<string> {
   const operations = parseApplyPatch(source);
@@ -142,12 +142,26 @@ export async function applyPatch(workspace: WorkspaceSandbox, source: string): P
       if (operation.type === "update" && operation.moveTo !== undefined)
         paths.add(operation.moveTo);
     }
+    const createdParents = new Set<string>();
+    for (const path of paths) {
+      workspace.resolve(path, { write: true });
+      let parent = dirname(path);
+      while (parent !== "." && parent !== "/" && !workspace.exists(parent)) {
+        createdParents.add(parent);
+        parent = dirname(parent);
+      }
+    }
     const snapshots: Snapshot[] = [...paths].map((path) => {
       const existed = workspace.exists(path);
       return {
         path,
         existed,
-        ...(existed ? { content: workspace.readFile(path) } : {}),
+        ...(existed
+          ? {
+              content: workspace.readFile(path),
+              mode: workspace.stat(path).mode & 0o777,
+            }
+          : {}),
       };
     });
     const changed: string[] = [];
@@ -190,9 +204,16 @@ export async function applyPatch(workspace: WorkspaceSandbox, source: string): P
       for (const snapshot of snapshots.reverse()) {
         if (snapshot.existed && snapshot.content !== undefined) {
           await workspace.writeFile(snapshot.path, snapshot.content);
+          if (snapshot.mode !== undefined) await workspace.chmod(snapshot.path, snapshot.mode);
         } else if (workspace.exists(snapshot.path)) {
           await workspace.remove(snapshot.path, true);
         }
+      }
+      const deepestParents = [...createdParents].sort(
+        (left, right) => right.split(/[\\/]/u).length - left.split(/[\\/]/u).length,
+      );
+      for (const parent of deepestParents) {
+        if (workspace.exists(parent)) await workspace.remove(parent);
       }
       throw error;
     }

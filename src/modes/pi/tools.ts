@@ -1,11 +1,15 @@
 import { join, matchesGlob, relative, sep } from "node:path";
 
 import {
-  createBashTool,
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
   createEditTool,
   createReadTool,
   createWriteTool,
+  formatSize,
+  truncateTail,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 import type { CodeModeInvocationContext, CodeModeToolDescriptor } from "../../broker/types.js";
 import type { VanillaPiBuiltin } from "../../core/mode.js";
@@ -13,6 +17,8 @@ import type { SandboxedProcessManager } from "../../sandbox/process-manager.js";
 import type { WorkspaceSandbox } from "../../sandbox/workspace.js";
 
 const MAX_WALK_ENTRIES = 20_000;
+const MAX_BASH_ROLLING_BYTES = DEFAULT_MAX_BYTES * 2;
+const MAX_TIMEOUT_SECONDS = 2_147_483_647 / 1_000;
 
 type PiTool = {
   name: string;
@@ -46,6 +52,114 @@ function textResult(text: string, details?: unknown): { content: unknown[]; deta
   return {
     content: [{ type: "text", text }],
     ...(details === undefined ? {} : { details }),
+  };
+}
+
+class BoundedBashOutput {
+  #tail = Buffer.alloc(0);
+  #totalBytes = 0;
+  #newlines = 0;
+  #lastByte: number | undefined;
+
+  // eslint-disable-next-line complexity -- Streaming byte, line, and UTF-8 tail bounds are one update.
+  append(data: Buffer): void {
+    this.#totalBytes += data.length;
+    for (const byte of data) if (byte === 0x0a) this.#newlines += 1;
+    if (data.length > 0) this.#lastByte = data[data.length - 1];
+    this.#tail = Buffer.concat([this.#tail, data]);
+    if (this.#tail.length <= MAX_BASH_ROLLING_BYTES) return;
+    let start = this.#tail.length - MAX_BASH_ROLLING_BYTES;
+    while (
+      start < this.#tail.length &&
+      (this.#tail[start] ?? 0) >= 0x80 &&
+      (this.#tail[start] ?? 0) < 0xc0
+    ) {
+      start += 1;
+    }
+    this.#tail = this.#tail.subarray(start);
+  }
+
+  snapshot(): { text: string; details?: unknown } {
+    const truncation = truncateTail(this.#tail.toString("utf8"));
+    const totalLines =
+      this.#totalBytes === 0 ? 0 : this.#newlines + (this.#lastByte === 0x0a ? 0 : 1);
+    const truncated =
+      this.#totalBytes > truncation.outputBytes || totalLines > truncation.outputLines;
+    if (!truncated) return { text: truncation.content || "(no output)" };
+    const fullTruncation = {
+      ...truncation,
+      truncated: true,
+      truncatedBy: totalLines > DEFAULT_MAX_LINES ? ("lines" as const) : ("bytes" as const),
+      totalLines,
+      totalBytes: this.#totalBytes,
+    };
+    const startLine = totalLines - truncation.outputLines + 1;
+    const text = `${truncation.content}\n\n[Showing lines ${String(startLine)}-${String(totalLines)} (${formatSize(truncation.outputBytes)} shown). Earlier output was discarded inside the session sandbox.]`;
+    return { text, details: { truncation: fullTruncation } };
+  }
+}
+
+function appendCommandStatus(text: string, status: string): string {
+  return `${text.length > 0 ? `${text}\n\n` : ""}${status}`;
+}
+
+function createSandboxedBashTool(
+  workspace: WorkspaceSandbox,
+  processes: SandboxedProcessManager,
+): PiTool {
+  return {
+    name: "bash",
+    description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${String(DEFAULT_MAX_LINES)} lines or ${String(DEFAULT_MAX_BYTES / 1_024)}KB (whichever is hit first). Earlier output is discarded inside the session sandbox. Optionally provide a timeout in seconds.`,
+    parameters: Type.Object({
+      command: Type.String({ description: "Shell command to execute" }),
+      timeout: Type.Optional(
+        Type.Number({ description: "Timeout in seconds (optional, no default timeout)" }),
+      ),
+    }),
+    // eslint-disable-next-line complexity -- Pi-compatible timeout, cancellation, and exit errors share one command path.
+    async execute(_callId, rawInput, signal) {
+      const input = rawInput as unknown as { command: string; timeout?: number };
+      if (input.timeout !== undefined) {
+        if (!Number.isFinite(input.timeout) || input.timeout <= 0) {
+          throw new Error("Invalid timeout: must be a finite number of seconds");
+        }
+        if (input.timeout > MAX_TIMEOUT_SECONDS) {
+          throw new Error(`Invalid timeout: maximum is ${String(MAX_TIMEOUT_SECONDS)} seconds`);
+        }
+      }
+      const output = new BoundedBashOutput();
+      let result: { exitCode: number | null };
+      try {
+        result = await processes.runOneShot(input.command, workspace.root, {
+          onData: (data) => {
+            output.append(data);
+          },
+          ...(signal === undefined ? {} : { signal }),
+          ...(input.timeout === undefined ? {} : { timeout: input.timeout }),
+        });
+      } catch (error) {
+        const snapshot = output.snapshot();
+        if (error instanceof Error && error.message === "aborted") {
+          throw new Error(appendCommandStatus(snapshot.text, "Command aborted"));
+        }
+        if (error instanceof Error && error.message.startsWith("timeout:")) {
+          throw new Error(
+            appendCommandStatus(
+              snapshot.text,
+              `Command timed out after ${String(input.timeout)} seconds`,
+            ),
+          );
+        }
+        throw error;
+      }
+      const snapshot = output.snapshot();
+      if (result.exitCode !== 0 && result.exitCode !== null) {
+        throw new Error(
+          appendCommandStatus(snapshot.text, `Command exited with code ${String(result.exitCode)}`),
+        );
+      }
+      return textResult(snapshot.text, snapshot.details);
+    },
   };
 }
 
@@ -246,15 +360,7 @@ export function createPiTools(
         operations: fileOperations,
       }) as PiTool,
     ],
-    [
-      "bash",
-      createBashTool(workspace.root, {
-        exposeSessionEnvironment: false,
-        operations: {
-          exec: (command, cwd, options) => processes.runOneShot(command, cwd, options),
-        },
-      }) as PiTool,
-    ],
+    ["bash", createSandboxedBashTool(workspace, processes)],
     [
       "edit",
       createEditTool(workspace.root, {

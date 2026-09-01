@@ -72,6 +72,15 @@ describe("Pi mode built-ins", () => {
     expect(readFileSync(join(root, "one.txt"), "utf8")).toBe("alpha\ngamma\n");
     expect(readFileSync(join(root, "two.txt"), "utf8")).toBe("second\n");
     expect(readFileSync(join(root, "shell.txt"), "utf8")).toBe("changed");
+
+    const large = await broker.invoke(
+      "pi.bash",
+      { command: `python3 -c 'print("x" * 60000)'`, timeout: 5 },
+      context(),
+    );
+    expect(large.details.truncation.truncated).toBe(true);
+    expect(large.details.fullOutputPath).toBeUndefined();
+    expect(text(large)).toContain("Earlier output was discarded inside the session sandbox");
   });
 
   it("runs optional grep, find, and ls and reports unavailable PowerShell", async () => {
