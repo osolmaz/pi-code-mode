@@ -7,7 +7,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { CodeModeBroker } from "../broker/broker.js";
+import { CodeModeBroker, CodeModeReplayCache } from "../broker/broker.js";
 import type { CodeModeToolDescriptor, CodeModeToolRegistration } from "../broker/types.js";
 import { resolveLimits } from "../core/limits.js";
 import {
@@ -57,6 +57,7 @@ export type CodeModeExtensionOptions = {
 
 class RuntimeOwner {
   readonly #hostProcess: HostProcessOptions | undefined;
+  readonly #replayCache = new CodeModeReplayCache();
   #hostManager: CodeModeHostManager | undefined;
   #hostSession: CodeModeHostSession | undefined;
   #starting: Promise<CodeModeHostSession> | undefined;
@@ -139,7 +140,10 @@ class RuntimeOwner {
         }
       },
     }));
-    return new CodeModeBroker(this.#workspace?.root ?? ".", wrapped, { mode: contract.mode });
+    return new CodeModeBroker(this.#workspace?.root ?? ".", wrapped, {
+      mode: contract.mode,
+      replayCache: this.#replayCache,
+    });
   }
 
   async session(): Promise<CodeModeHostSession> {
@@ -164,6 +168,7 @@ class RuntimeOwner {
     this.#workspace = undefined;
     this.#contract = undefined;
     this.#descriptors = [];
+    this.#replayCache.clear();
     processes?.close();
     await session?.close();
     await manager?.close();

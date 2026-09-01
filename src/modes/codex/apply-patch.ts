@@ -102,6 +102,7 @@ export function parseApplyPatch(source: string): PatchOperation[] {
 // Matching context, ambiguity, insertions, and trailing newlines are separate patch cases.
 // eslint-disable-next-line complexity
 function replaceHunks(content: string, operation: UpdateOperation): string {
+  const lineEnding = content.includes("\r\n") ? "\r\n" : "\n";
   const trailingNewline = content.endsWith("\n");
   const lines = content.replace(/\r\n/gu, "\n").split("\n");
   if (trailingNewline) lines.pop();
@@ -125,8 +126,8 @@ function replaceHunks(content: string, operation: UpdateOperation): string {
     lines.splice(found, oldLines.length, ...newLines);
     searchFrom = found + newLines.length;
   }
-  const result = lines.join("\n");
-  return trailingNewline ? `${result}\n` : result;
+  const result = lines.join(lineEnding);
+  return trailingNewline ? `${result}${lineEnding}` : result;
 }
 
 type Snapshot = { path: string; existed: boolean; content?: Buffer; mode?: number };
