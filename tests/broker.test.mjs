@@ -36,6 +36,18 @@ describe("nested tool broker", () => {
     expect(Object.isFrozen(broker.descriptors[0].sdkPath)).toBe(true);
   });
 
+  it("admits bracket-access tool paths", () => {
+    const broker = new CodeModeBroker("/work", [
+      descriptor("search", async () => "ok", { sdkPath: ["project", "issue.search"] }),
+      descriptor("dash", async () => "ok", { sdkPath: ["project", "issue-search"] }),
+    ]);
+
+    expect(broker.descriptors.map((tool) => tool.sdkPath)).toEqual([
+      ["project", "issue.search"],
+      ["project", "issue-search"],
+    ]);
+  });
+
   it("admits coding effects and rejects disabled network effects", () => {
     expect(
       () =>

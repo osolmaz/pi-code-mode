@@ -377,6 +377,8 @@ Path handling must reject:
 
 The broker opens the workspace and scratch roots once and keeps stable directory descriptors. It walks each parent component relative to those descriptors with `O_DIRECTORY` and `O_NOFOLLOW`. Reads, writes, directory creation, removal, and moves then operate through `/proc/self/fd`. A command cannot redirect a broker operation outside the sandbox by replacing a validated parent with a symlink.
 
+Normal Git metadata stays available. Before a direct read or command, the broker checks `.git/config`, nested Git config, and `.gitmodules` for URL user information, authorization headers, and token or password fields. Credential-bearing Git configuration is not exposed.
+
 Writes use atomic replacement where the operation permits it. Failed multi-file patches restore file contents, file modes, moves, and parent directories created by the failed transaction. Pi's file mutation queue serializes changes to the same file. Results report changed paths.
 
 The production Code Mode tool sets are writable. Read-only behavior is not retained as a legacy mode.
@@ -394,6 +396,7 @@ It supports:
 - standard-input writes;
 - explicit wait and terminate operations;
 - complete process-tree termination;
+- broker-owned PTY descriptors without access to the host `/dev/pts` tree;
 - bounded command count, process count, output, memory, and wall time;
 - termination after 8 MiB of total command output.
 
@@ -403,7 +406,7 @@ The outer Code Mode `wait` observes a V8 cell. Codex process tools and Pi comman
 
 ## Command environment
 
-Commands receive a newly built environment rather than `process.env`.
+Commands receive a newly built environment rather than `process.env`. The trusted worker allocates a PTY before it applies Landlock when TTY behavior is requested. The command receives only inherited controller and user descriptors. It cannot enumerate or open the user's other pseudo-terminals.
 
 The default environment contains only values needed for normal local commands, such as a controlled `PATH`, locale, workspace path, and scratch path. It uses a private home directory.
 
