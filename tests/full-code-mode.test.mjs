@@ -6,6 +6,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -65,6 +66,9 @@ describe("writable workspace sandbox", () => {
     await expect(workspace.remove(".", true)).rejects.toThrow("cannot remove");
     expect(() => workspace.resolve("/etc/passwd")).toThrow("escapes");
     expect(() => workspace.resolve("bad\0path")).toThrow("invalid");
+    writeFileSync(join(root, "large.bin"), "");
+    truncateSync(join(root, "large.bin"), 16 * 1024 * 1024 + 1);
+    expect(() => workspace.readFile("large.bin")).toThrow("read limit");
     chmodSync(root, 0o700);
   });
 

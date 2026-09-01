@@ -490,6 +490,10 @@ function installCodeMode(
   }
 
   pi.on("session_start", async (_event, context) => {
+    const activeAtSessionStart = pi
+      .getActiveTools()
+      .filter((name) => name !== "exec" && name !== "wait");
+    if (activeAtSessionStart.length > 0) baselineTools = activeAtSessionStart;
     collecting = true;
     registrations = [];
     try {
@@ -524,6 +528,7 @@ function installCodeMode(
     cellTraces.clear();
     await runtime.shutdown();
     if (baselineTools !== undefined) pi.setActiveTools(baselineTools);
+    baselineTools = undefined;
   });
 }
 

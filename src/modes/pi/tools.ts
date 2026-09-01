@@ -1,4 +1,4 @@
-import { basename, join, matchesGlob, relative, sep } from "node:path";
+import { join, matchesGlob, relative, sep } from "node:path";
 
 import {
   DEFAULT_MAX_BYTES,
@@ -7,6 +7,7 @@ import {
   createReadTool,
   createWriteTool,
   formatSize,
+  truncateHead,
   truncateTail,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -19,6 +20,7 @@ import type { WorkspaceSandbox } from "../../sandbox/workspace.js";
 const MAX_WALK_ENTRIES = 20_000;
 const MAX_BASH_ROLLING_BYTES = DEFAULT_MAX_BYTES * 2;
 const MAX_TIMEOUT_SECONDS = 2_147_483_647 / 1_000;
+const MAX_GREP_CAPTURE_BYTES = DEFAULT_MAX_BYTES * 4;
 
 type PiTool = {
   name: string;
@@ -163,6 +165,28 @@ function createSandboxedBashTool(
   };
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function createSandboxedPowerShellTool(
+  workspace: WorkspaceSandbox,
+  processes: SandboxedProcessManager,
+): PiTool {
+  const bash = createSandboxedBashTool(workspace, processes);
+  return {
+    ...bash,
+    name: "powershell",
+    description: "Execute a PowerShell command in the current working directory.",
+    execute(callId, rawInput, signal) {
+      const input = rawInput as unknown as { command: string; timeout?: number };
+      const command = `command -v pwsh >/dev/null || { printf '%s\\n' 'PowerShell is not installed' >&2; exit 127; }
+exec pwsh -NoProfile -NonInteractive -Command ${shellQuote(input.command)}`;
+      return bash.execute(callId, { ...input, command } as never, signal);
+    },
+  };
+}
+
 function positiveLimit(value: unknown, fallback = 1_000): number {
   if (value === undefined) return fallback;
   if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 10_000) {
@@ -182,6 +206,118 @@ function recordInput(input: unknown): Record<string, unknown> {
     throw new Error("tool input must be an object");
   }
   return input as Record<string, unknown>;
+}
+
+class BoundedGrepOutput {
+  readonly #chunks: Buffer[] = [];
+  #storedBytes = 0;
+  #totalBytes = 0;
+
+  append(data: Buffer): void {
+    this.#totalBytes += data.length;
+    const remaining = MAX_GREP_CAPTURE_BYTES - this.#storedBytes;
+    if (remaining <= 0) return;
+    const stored = data.subarray(0, remaining);
+    this.#chunks.push(stored);
+    this.#storedBytes += stored.length;
+  }
+
+  text(): string {
+    return Buffer.concat(this.#chunks, this.#storedBytes).toString("utf8");
+  }
+
+  get truncated(): boolean {
+    return this.#totalBytes > this.#storedBytes;
+  }
+
+  get totalBytes(): number {
+    return this.#totalBytes;
+  }
+}
+
+type SandboxedGrepInput = {
+  pattern: string;
+  path: string;
+  glob?: string;
+  ignoreCase: boolean;
+  literal: boolean;
+  context: number;
+  limit: number;
+};
+
+// eslint-disable-next-line complexity -- Sandboxed rg options, bounded capture, exit handling, and Pi result details share one call.
+async function runSandboxedGrep(
+  input: SandboxedGrepInput,
+  workspace: WorkspaceSandbox,
+  processes: SandboxedProcessManager,
+  signal?: AbortSignal,
+): Promise<{ content: unknown[]; details?: unknown }> {
+  const target = workspace.resolve(input.path).absolute;
+  const args = [
+    "rg",
+    "--line-number",
+    "--with-filename",
+    "--no-heading",
+    "--color=never",
+    "--hidden",
+    "--max-count",
+    String(input.limit),
+  ];
+  if (input.ignoreCase) args.push("--ignore-case");
+  if (input.literal) args.push("--fixed-strings");
+  if (input.context > 0) args.push("--context", String(input.context));
+  if (input.glob !== undefined) args.push("--glob", input.glob);
+  args.push(
+    "--glob",
+    "!node_modules/**",
+    "--glob",
+    "!dist/**",
+    "--glob",
+    "!coverage/**",
+    "--",
+    input.pattern,
+    target,
+  );
+
+  const capture = new BoundedGrepOutput();
+  const result = await processes.runOneShot(args.map(shellQuote).join(" "), workspace.root, {
+    onData: (data) => {
+      capture.append(data);
+    },
+    ...(signal === undefined ? {} : { signal }),
+  });
+  if (result.exitCode !== 0 && result.exitCode !== 1 && result.exitCode !== null) {
+    throw new Error(
+      appendCommandStatus(capture.text(), `grep exited with code ${String(result.exitCode)}`),
+    );
+  }
+
+  const rootPrefix = `${workspace.root}${sep}`;
+  const lines = capture.text().replaceAll(rootPrefix, "").split(/\r?\n/u);
+  const selected: string[] = [];
+  let matchCount = 0;
+  for (const line of lines) {
+    const isMatch = /:\d+:/u.test(line);
+    if (isMatch && matchCount >= input.limit) break;
+    if (isMatch) matchCount += 1;
+    if (line.length > 0) selected.push(line.replace(/([:-]\d+[:-])(?=\S)/u, "$1 "));
+  }
+  const truncation = truncateHead(selected.join("\n"), {
+    maxLines: Number.MAX_SAFE_INTEGER,
+  });
+  const details = {
+    ...(matchCount >= input.limit ? { matchLimitReached: input.limit } : {}),
+    ...(truncation.truncated || capture.truncated
+      ? {
+          truncation: {
+            ...truncation,
+            truncated: true,
+            totalBytes: Math.max(truncation.totalBytes, capture.totalBytes),
+          },
+        }
+      : {}),
+  };
+  return textResult(truncation.content, Object.keys(details).length === 0 ? undefined : details);
 }
 
 function walkFiles(workspace: WorkspaceSandbox, start: string): string[] {
@@ -208,25 +344,12 @@ function walkFiles(workspace: WorkspaceSandbox, start: string): string[] {
 }
 
 // Optional built-ins keep separate schemas and result formatting in one selector.
-// eslint-disable-next-line max-lines-per-function
 function optionalTool(
   name: "grep" | "find" | "ls" | "powershell",
   workspace: WorkspaceSandbox,
+  processes: SandboxedProcessManager,
 ): PiTool {
-  if (name === "powershell") {
-    return {
-      name,
-      description: "Execute PowerShell commands.",
-      parameters: {
-        type: "object",
-        properties: { command: { type: "string" }, timeout: { type: "number" } },
-        required: ["command"],
-        additionalProperties: false,
-      },
-      execute: () =>
-        Promise.reject(new Error("PowerShell is not available in this Code Mode host")),
-    };
-  }
+  if (name === "powershell") return createSandboxedPowerShellTool(workspace, processes);
   if (name === "ls") {
     return {
       name,
@@ -303,56 +426,21 @@ function optionalTool(
       required: ["pattern"],
       additionalProperties: false,
     },
-    // Regex compilation, traversal, binary filtering, and output limits are independent cases.
-    // eslint-disable-next-line complexity
-    execute: (_callId, value) => {
+    execute: (_callId, value, signal) => {
       const input = recordInput(value);
-      const path = stringInput(input, "path", ".");
-      const pattern = stringInput(input, "pattern");
-      const limit = positiveLimit(input["limit"], 100);
-      const context =
-        typeof input["context"] === "number" && input["context"] > 0
-          ? Math.floor(input["context"])
-          : 0;
-      const glob = input["glob"] === undefined ? undefined : stringInput(input, "glob");
-      const flags = input["ignoreCase"] === true ? "iu" : "u";
-      const expression =
-        input["literal"] === true
-          ? new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), flags)
-          : new RegExp(pattern, flags);
-      const base = workspace.resolve(path).absolute;
-      const singleFile = workspace.stat(path).isFile();
-      const files = singleFile ? [base] : walkFiles(workspace, path);
-      const matches: string[] = [];
-      let matchCount = 0;
-      for (const file of files) {
-        const display = singleFile ? basename(file) : relative(base, file).split(sep).join("/");
-        if (glob !== undefined && !matchesGlob(display, glob) && !matchesGlob(basename(file), glob))
-          continue;
-        const content = workspace.readFile(file);
-        if (content.includes(0)) continue;
-        const lines = content.toString("utf8").split(/\r?\n/u);
-        for (const [index, line] of lines.entries()) {
-          expression.lastIndex = 0;
-          if (!expression.test(line)) continue;
-          matchCount += 1;
-          const start = Math.max(0, index - context);
-          const end = Math.min(lines.length - 1, index + context);
-          for (let contextIndex = start; contextIndex <= end; contextIndex += 1) {
-            const separator = contextIndex === index ? ":" : "-";
-            matches.push(
-              `${display}${separator}${String(contextIndex + 1)}${separator} ${lines[contextIndex] ?? ""}`,
-            );
-          }
-          if (matchCount >= limit) break;
-        }
-        if (matchCount >= limit) break;
-      }
-      return Promise.resolve(
-        textResult(matches.join("\n"), {
-          matchLimitReached: matchCount === limit ? limit : undefined,
-        }),
-      );
+      const grepInput: SandboxedGrepInput = {
+        path: stringInput(input, "path", "."),
+        pattern: stringInput(input, "pattern"),
+        limit: positiveLimit(input["limit"], 100),
+        context:
+          typeof input["context"] === "number" && input["context"] > 0
+            ? Math.min(100, Math.floor(input["context"]))
+            : 0,
+        ignoreCase: input["ignoreCase"] === true,
+        literal: input["literal"] === true,
+        ...(input["glob"] === undefined ? {} : { glob: stringInput(input, "glob") }),
+      };
+      return runSandboxedGrep(grepInput, workspace, processes, signal);
     },
   };
 }
@@ -402,7 +490,7 @@ export function createPiTools(
     ],
   ]);
   for (const name of ["grep", "find", "ls", "powershell"] as const) {
-    tools.set(name, optionalTool(name, workspace));
+    tools.set(name, optionalTool(name, workspace, processes));
   }
   return Object.freeze(
     builtins.map((name) => {
