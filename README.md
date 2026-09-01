@@ -169,6 +169,7 @@ Nested commands run in separate restricted workers. They have:
 - no network sockets;
 - no access to the user's real home or credentials;
 - CPU, memory, file-size, open-file, process, output, and lifetime limits;
+- termination after 8 MiB of total command output;
 - at most eight active command workers per harness by default;
 - bounded, expiring records for completed commands that the model does not poll;
 - trusted worker configuration sent through a private pipe rather than command-writable files;
@@ -176,11 +177,13 @@ Nested commands run in separate restricted workers. They have:
 - process-group cleanup with `SIGKILL` escalation two seconds after cancellation or session shutdown;
 - seccomp denial of `setsid` and `setpgid`, so descendants cannot leave that process group.
 
-The file tools map `/tmp` to private session scratch space. Sandboxed commands receive the same directory through `TMPDIR`. File operations walk from stable workspace or scratch directory descriptors with no-follow checks, so a running command cannot redirect a broker write through a symlink race. Parent-process file reads reject files larger than 16 MiB before allocation. Optional Pi grep runs the existing `rg` binary inside the command sandbox, so generated regular expressions do not run in Pi's Node.js process.
+The file tools map `/tmp` to private session scratch space. Sandboxed commands receive the same directory through `TMPDIR`. Scratch has a 256 MiB and 50,000-entry session limit by default. Broker writes check this limit before writing, and the process manager checks command writes while commands run and when they exit.
+
+File operations walk from stable workspace or scratch directory descriptors with no-follow checks, so a running command cannot redirect a broker write through a symlink race. Parent-process file reads use nonblocking opens, reject special files, and reject regular files larger than 16 MiB before allocation. Optional Pi grep runs the existing `rg` binary inside the command sandbox, so generated regular expressions do not run in Pi's Node.js process.
 
 Commands fail closed when the workspace contains a common credential path such as `.env`, `.ssh`, `.aws`, `.npmrc`, or a token or credentials file. Remove that path from the test workspace before you let an untrusted model run commands.
 
-Pi Code Mode records the selected session contract and nested side-effect metadata in the Pi session. It does not use a blanket approval prompt. Use a small, non-sensitive workspace when you test a model you do not trust.
+Pi Code Mode records the selected session contract and nested side-effect metadata in the Pi session. It keeps results for unsafe nested call IDs in memory for the active session, so replaying a completed top-level call does not repeat its writes or commands. It does not use a blanket approval prompt. Use a small, non-sensitive workspace when you test a model you do not trust.
 
 ## Design
 

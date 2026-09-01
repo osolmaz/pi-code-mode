@@ -76,6 +76,7 @@ describe("writable workspace sandbox", () => {
     const fileRoot = join(root, "not-a-directory");
     writeFileSync(fileRoot, "file");
     expect(() => new WorkspaceSandbox(fileRoot)).toThrow("workspace root must be a directory");
+    expect(() => new WorkspaceSandbox(root, tmpdir(), 0)).toThrow("maxScratchBytes");
 
     expect(() => workspace.resolve(0)).toThrow("path must not be empty");
     await workspace.writeFile("/tmp/move.txt", "scratch");
@@ -156,6 +157,23 @@ done`,
     expect(workspace.stat("executable.sh").mode & 0o777).toBe(0o755);
     expect(workspace.exists("created")).toBe(false);
   });
+  it("preserves CRLF line endings when it updates a file", async () => {
+    writeFileSync(join(root, "windows.txt"), "first\r\nsecond\r\n");
+
+    await applyPatch(
+      workspace,
+      `*** Begin Patch
+*** Update File: windows.txt
+@@
+ first
+-second
++changed
+*** End Patch`,
+    );
+
+    expect(readFileSync(join(root, "windows.txt"), "utf8")).toBe("first\r\nchanged\r\n");
+  });
+
   it("parses delete, move, insertion, and malformed Codex patch cases", async () => {
     writeFileSync(join(root, "move.txt"), "first\nlast");
     writeFileSync(join(root, "delete.txt"), "delete\n");
@@ -246,6 +264,34 @@ PY`,
     expect(result.exit_code).toBe(0);
     await new Promise((resolve) => setTimeout(resolve, 700));
     expect(existsSync(join(root, "delayed.txt"))).toBe(false);
+  });
+
+  it("rejects command-created special files without blocking the parent", async () => {
+    const result = await processes.exec({ cmd: "mkfifo blocked.pipe", yield_time_ms: 2_000 });
+
+    expect(result.exit_code).toBe(0);
+    expect(() => workspace.readFile("blocked.pipe")).toThrow("path must be a file");
+  });
+
+  it("enforces a cumulative session scratch limit", async () => {
+    const limitedWorkspace = new WorkspaceSandbox(root, tmpdir(), 16 * 1_024);
+    const limitedProcesses = new SandboxedProcessManager(limitedWorkspace);
+    try {
+      const result = await limitedProcesses.exec({
+        cmd: 'for name in one two three; do head -c 8192 /dev/zero > "$TMPDIR/$name"; done',
+        yield_time_ms: 2_000,
+      });
+
+      expect(result.exit_code).toBe(1);
+      expect(result.output).toContain("session scratch exceeds the 16384-byte limit");
+      expect(limitedWorkspace.scratchUsage().bytes).toBeGreaterThan(16 * 1_024);
+      await expect(
+        limitedWorkspace.writeFile("/tmp/four", Buffer.alloc(4 * 1_024)),
+      ).rejects.toThrow("session scratch exceeds");
+    } finally {
+      limitedProcesses.close();
+      limitedWorkspace.close();
+    }
   });
 
   it("uses the private scratch directory as a command workdir", async () => {

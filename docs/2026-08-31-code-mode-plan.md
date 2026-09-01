@@ -289,6 +289,8 @@ The tool builder must:
 
 Read, write, execute, network, and interactive effects can enter a mode only when the matching executor and policy exist. Safety comes from the workspace sandbox, command sandbox, schemas, limits, cancellation, and explicit tool admission. A read-only rule is not the security boundary.
 
+Unsafe nested calls use a session-owned replay cache keyed by the host session, top-level tool call, and nested call ID. Replaying a completed `exec` returns the recorded unsafe result instead of repeating a write, command, or interaction. A reused ID with different tool input fails. The cache has a fixed entry limit and is cleared at session shutdown. Read-only calls can run again.
+
 ## Project and third-party Pi tools
 
 Pi's public `getAllTools()` returns metadata but not execution callbacks. Pi Code Mode cannot automatically wrap every installed tool without a private API.
@@ -362,13 +364,13 @@ The default writable roots are:
 - the selected workspace;
 - the session's private scratch directory, presented to file tools as `/tmp` and to commands through `TMPDIR`.
 
-The real system `/tmp` is not exposed. Scratch data is bounded and removed when the session closes.
+The real system `/tmp` is not exposed. Scratch data is removed when the session closes. The default cumulative limit is 256 MiB and 50,000 entries. Broker writes check projected use before writing. The process manager checks use while commands run and when they exit, and stops command groups that cross the limit.
 
 Path handling must reject:
 
 - parent traversal that leaves an allowed root;
 - symlink and junction escapes;
-- magic links and device paths;
+- magic links, FIFOs, sockets, and device paths;
 - credential paths outside the workspace;
 - races that replace a validated path before mutation;
 - parent-process reads above 16 MiB before allocating their contents.
@@ -392,7 +394,8 @@ It supports:
 - standard-input writes;
 - explicit wait and terminate operations;
 - complete process-tree termination;
-- bounded command count, process count, output, memory, and wall time.
+- bounded command count, process count, output, memory, and wall time;
+- termination after 8 MiB of total command output.
 
 A process handle belongs to one Pi session. Another session cannot observe or control it. Handles expire after cleanup.
 

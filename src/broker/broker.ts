@@ -6,10 +6,38 @@ import type { CodeModeInvocationContext, CodeModeToolDescriptor, ToolEffect } fr
 
 const SAFE_SEGMENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/u;
 const RESERVED_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
+const MAX_REPLAY_ENTRIES = 4_096;
+
+type ReplayEntry = { signature: string; result: Promise<unknown> };
+
+export class CodeModeReplayCache {
+  readonly #entries = new Map<string, ReplayEntry>();
+
+  run(key: string, signature: string, invoke: () => Promise<unknown>): Promise<unknown> {
+    const existing = this.#entries.get(key);
+    if (existing !== undefined) {
+      if (existing.signature !== signature) {
+        throw new Error("replayed nested tool call does not match its original request");
+      }
+      return existing.result;
+    }
+    if (this.#entries.size >= MAX_REPLAY_ENTRIES) {
+      throw new Error(`Code Mode replay cache is limited to ${String(MAX_REPLAY_ENTRIES)} calls`);
+    }
+    const result = Promise.resolve().then(invoke);
+    this.#entries.set(key, { signature, result });
+    return result;
+  }
+
+  clear(): void {
+    this.#entries.clear();
+  }
+}
 
 export type CodeModeBrokerOptions = {
   mode?: CodeModeMode;
   allowedEffects?: readonly ToolEffect[];
+  replayCache?: CodeModeReplayCache;
 };
 
 function pathName(path: readonly string[]): string {
@@ -32,6 +60,7 @@ export class CodeModeBroker {
   readonly #byId: ReadonlyMap<string, CodeModeToolDescriptor>;
   readonly #controller = new AbortController();
   readonly #seenCallIds = new Set<string>();
+  readonly #replayCache: CodeModeReplayCache;
   readonly #cwd: string;
   readonly #mode: CodeModeMode;
 
@@ -79,6 +108,7 @@ export class CodeModeBroker {
     this.#cwd = cwd;
     this.#mode = mode;
     this.#byId = byId;
+    this.#replayCache = options.replayCache ?? new CodeModeReplayCache();
   }
 
   get descriptors(): readonly CodeModeToolDescriptor[] {
@@ -90,7 +120,6 @@ export class CodeModeBroker {
   }
 
   // Invocation validates both sides of the callback and preserves the abort boundary.
-  // eslint-disable-next-line complexity
   async invoke(
     tool: string,
     input: unknown,
@@ -99,7 +128,8 @@ export class CodeModeBroker {
     this.#controller.signal.throwIfAborted();
     const descriptor = this.#byId.get(tool);
     if (descriptor === undefined) throw new Error(`tool is not allowed in this cell: ${tool}`);
-    if (this.#seenCallIds.has(context.nestedToolCallId)) {
+    const seen = this.#seenCallIds.has(context.nestedToolCallId);
+    if (seen && descriptor.replay === "safe") {
       throw new Error(`nested tool call was already dispatched: ${context.nestedToolCallId}`);
     }
     this.#seenCallIds.add(context.nestedToolCallId);
@@ -112,23 +142,29 @@ export class CodeModeBroker {
       }
       if (!valid) throw new Error(`tool input does not match its schema: ${descriptor.id}`);
     }
-    const result = await descriptor.invoke(
-      input,
-      { ...context, cwd: this.#cwd, mode: this.#mode },
-      this.#controller.signal,
-    );
-    this.#controller.signal.throwIfAborted();
-    const normalized = result === undefined ? null : result;
-    if (descriptor.outputSchema !== undefined) {
-      let valid = false;
-      try {
-        valid = Check(descriptor.outputSchema as TSchema, normalized);
-      } catch {
-        throw new Error(`tool has an invalid output schema: ${descriptor.id}`);
+    const invoke = async (): Promise<unknown> => {
+      const result = await descriptor.invoke(
+        input,
+        { ...context, cwd: this.#cwd, mode: this.#mode },
+        this.#controller.signal,
+      );
+      this.#controller.signal.throwIfAborted();
+      const normalized = result === undefined ? null : result;
+      if (descriptor.outputSchema !== undefined) {
+        let valid = false;
+        try {
+          valid = Check(descriptor.outputSchema as TSchema, normalized);
+        } catch {
+          throw new Error(`tool has an invalid output schema: ${descriptor.id}`);
+        }
+        if (!valid) throw new Error(`tool output does not match its schema: ${descriptor.id}`);
       }
-      if (!valid) throw new Error(`tool output does not match its schema: ${descriptor.id}`);
-    }
-    JSON.stringify(normalized);
-    return normalized;
+      JSON.stringify(normalized);
+      return normalized;
+    };
+    if (descriptor.replay === "safe") return invoke();
+    const signature = `${descriptor.id}\0${JSON.stringify(input)}`;
+    const key = `${context.sessionId}\0${context.parentToolCallId}\0${context.nestedToolCallId}`;
+    return this.#replayCache.run(key, signature, invoke);
   }
 }

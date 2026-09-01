@@ -1,4 +1,4 @@
-export { CodeModeBroker } from "./broker/broker.js";
+export { CodeModeBroker, CodeModeReplayCache } from "./broker/broker.js";
 export type {
   CodeModeInvocationContext,
   CodeModeToolDescriptor,

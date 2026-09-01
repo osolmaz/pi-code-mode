@@ -13,6 +13,7 @@ const MAX_YIELD_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
 const MAX_MAX_OUTPUT_TOKENS = 100_000;
 const MAX_TOTAL_OUTPUT_BYTES = 8 * 1024 * 1024;
+const SCRATCH_CHECK_INTERVAL_MS = 25;
 const MAX_INPUT_BYTES = 1024 * 1024;
 const DEFAULT_WALL_TIME_LIMIT_MS = 30 * 60 * 1_000;
 const MAX_WALL_TIME_LIMIT_MS = 24 * 60 * 60 * 1_000;
@@ -143,8 +144,10 @@ export class SandboxedProcessManager {
   readonly #workspace: WorkspaceSandbox;
   readonly #options: Required<SandboxedProcessManagerOptions>;
   readonly #processes = new Map<number, ManagedProcess>();
+  readonly #scratchTimer: NodeJS.Timeout;
   #nextId = 1;
   #closed = false;
+  #scratchLimitExceeded = false;
 
   constructor(workspace: WorkspaceSandbox, options: SandboxedProcessManagerOptions = {}) {
     this.#workspace = workspace;
@@ -152,7 +155,10 @@ export class SandboxedProcessManager {
       hostBinary: options.hostBinary ?? resolveHostBinary(),
       cpuLimitSeconds: options.cpuLimitSeconds ?? 300,
       memoryLimitBytes: options.memoryLimitBytes ?? 2 * 1024 * 1024 * 1024,
-      fileSizeLimitBytes: options.fileSizeLimitBytes ?? 1024 * 1024 * 1024,
+      fileSizeLimitBytes: Math.min(
+        options.fileSizeLimitBytes ?? 1024 * 1024 * 1024,
+        workspace.maxScratchBytes,
+      ),
       openFileLimit: options.openFileLimit ?? 256,
       processLimit: options.processLimit ?? currentUserProcessLimit(),
       wallTimeLimitMs: boundedInteger(
@@ -170,6 +176,12 @@ export class SandboxedProcessManager {
         "maxActiveProcesses",
       ),
     };
+    this.#scratchTimer = setInterval(() => {
+      if ([...this.#processes.values()].some((process) => !process.closed)) {
+        this.#enforceScratchLimit();
+      }
+    }, SCRATCH_CHECK_INTERVAL_MS);
+    this.#scratchTimer.unref();
   }
 
   async exec(input: ExecCommandInput, signal?: AbortSignal): Promise<CommandResult> {
@@ -194,6 +206,7 @@ export class SandboxedProcessManager {
     }
     if (input.login === true) throw new Error("login shells are not available");
     this.#workspace.assertCommandSafe();
+    this.#workspace.assertScratchWithinLimit();
     const workdir = this.#workspace.resolve(input.workdir ?? ".");
     if (!this.#workspace.stat(workdir.absolute).isDirectory()) {
       throw new Error("workdir must be a directory");
@@ -297,6 +310,7 @@ export class SandboxedProcessManager {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    clearInterval(this.#scratchTimer);
     for (const process of this.#processes.values()) {
       if (process.evictionTimer !== undefined) clearTimeout(process.evictionTimer);
       this.#terminate(process);
@@ -366,8 +380,9 @@ export class SandboxedProcessManager {
       // creation and process-group changes are denied, so one final group kill removes it before
       // this command is reported as complete.
       this.#signalGroup(managed, "SIGKILL");
+      const scratchExceeded = this.#enforceScratchLimit();
       managed.closed = true;
-      managed.exitCode = code ?? (signal === null ? 1 : 128);
+      managed.exitCode = scratchExceeded ? 1 : (code ?? (signal === null ? 1 : 128));
       if (managed.lifetimeTimer !== undefined) clearTimeout(managed.lifetimeTimer);
       if (managed.terminationTimer !== undefined) clearTimeout(managed.terminationTimer);
       managed.outputListeners.clear();
@@ -458,6 +473,25 @@ export class SandboxedProcessManager {
     const process = this.#processes.get(id);
     if (process?.evictionTimer !== undefined) clearTimeout(process.evictionTimer);
     this.#processes.delete(id);
+  }
+
+  #enforceScratchLimit(): boolean {
+    try {
+      this.#workspace.assertScratchWithinLimit();
+      this.#scratchLimitExceeded = false;
+      return false;
+    } catch (error) {
+      if (this.#scratchLimitExceeded) return true;
+      this.#scratchLimitExceeded = true;
+      const message = error instanceof Error ? error.message : String(error);
+      const notice = Buffer.from(`\n[command terminated: ${message}]\n`);
+      for (const process of this.#processes.values()) {
+        if (process.closed) continue;
+        this.#append(process, notice);
+        this.#terminate(process);
+      }
+      return true;
+    }
   }
 
   #signalGroup(process: ManagedProcess, signal: NodeJS.Signals): void {

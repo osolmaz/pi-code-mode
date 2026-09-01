@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { CodeModeBroker } from "../src/index.ts";
+import { CodeModeBroker, CodeModeReplayCache } from "../src/index.ts";
 
 function descriptor(id, invoke, overrides = {}) {
   return {
@@ -112,6 +112,34 @@ describe("nested tool broker", () => {
     await expect(
       broker.invoke("typed", { value: 1 }, { ...invocation, nestedToolCallId: "nested-2" }),
     ).rejects.toThrow("input does not match");
+  });
+
+  it("returns cached unsafe results when a top-level call is replayed", async () => {
+    const replayCache = new CodeModeReplayCache();
+    let calls = 0;
+    const unsafe = descriptor(
+      "write",
+      async (input) => {
+        calls += 1;
+        return { input, calls };
+      },
+      { effect: "write", replay: "unsafe" },
+    );
+    const first = new CodeModeBroker("/work", [unsafe], { replayCache });
+    const second = new CodeModeBroker("/work", [unsafe], { replayCache });
+
+    await expect(first.invoke("write", { value: 1 }, invocation)).resolves.toEqual({
+      input: { value: 1 },
+      calls: 1,
+    });
+    await expect(second.invoke("write", { value: 1 }, invocation)).resolves.toEqual({
+      input: { value: 1 },
+      calls: 1,
+    });
+    expect(calls).toBe(1);
+    await expect(second.invoke("write", { value: 2 }, invocation)).rejects.toThrow(
+      "does not match",
+    );
   });
 
   it("rejects calls after cancellation and non-JSON results", async () => {

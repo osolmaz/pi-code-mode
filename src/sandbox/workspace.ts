@@ -25,6 +25,16 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 
+import {
+  DEFAULT_MAX_SCRATCH_BYTES,
+  allocatedBytes,
+  assertProjectedScratchWrite,
+  assertScratchUsage,
+  measureScratchUsage,
+  validateScratchLimit,
+  type ScratchUsage,
+} from "./scratch-quota.js";
+
 const SENSITIVE_NAMES = new Set([
   ".aws",
   ".azure",
@@ -55,6 +65,7 @@ const SENSITIVE_SUFFIXES = [".key", ".p12", ".pem", ".pfx"];
 const MAX_PATH_BYTES = 16 * 1024;
 const DEFAULT_MAX_READ_BYTES = 16 * 1024 * 1024;
 const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+const FILE_READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
 
 export type ResolvedSandboxPath = {
   absolute: string;
@@ -102,17 +113,24 @@ export class WorkspaceSandbox {
   readonly #rootFd: number;
   readonly #scratch: string;
   readonly #scratchFd: number;
+  readonly #maxScratchBytes: number;
   #closed = false;
   #mutationQueue = Promise.resolve();
   readonly #mutationContext = new AsyncLocalStorage<boolean>();
 
-  constructor(rootDir: string, scratchParent = tmpdir()) {
+  constructor(
+    rootDir: string,
+    scratchParent = tmpdir(),
+    maxScratchBytes = DEFAULT_MAX_SCRATCH_BYTES,
+  ) {
+    validateScratchLimit(maxScratchBytes);
     this.#root = realpathSync(rootDir);
     if (!statSync(this.#root).isDirectory()) throw new Error("workspace root must be a directory");
     this.#rootFd = openSync(this.#root, DIRECTORY_OPEN_FLAGS);
     this.#scratch = realpathSync(mkdtempSync(join(scratchParent, "pi-code-mode-")));
     chmodSync(this.#scratch, 0o700);
     this.#scratchFd = openSync(this.#scratch, DIRECTORY_OPEN_FLAGS);
+    this.#maxScratchBytes = maxScratchBytes;
   }
 
   get root(): string {
@@ -121,6 +139,19 @@ export class WorkspaceSandbox {
 
   get scratch(): string {
     return this.#scratch;
+  }
+
+  get maxScratchBytes(): number {
+    return this.#maxScratchBytes;
+  }
+
+  scratchUsage(): ScratchUsage {
+    this.#assertOpen();
+    return measureScratchUsage(this.#scratch, this.#maxScratchBytes);
+  }
+
+  assertScratchWithinLimit(): void {
+    assertScratchUsage(this.scratchUsage(), this.#maxScratchBytes);
   }
 
   // Resolution checks virtual paths, lexical containment, sensitivity, and symlink containment.
@@ -188,10 +219,7 @@ export class WorkspaceSandbox {
     }
     const target = this.resolve(path);
     return this.#withParent(target, false, (parentFd, name) => {
-      const fd = openSync(
-        this.#descriptorPath(parentFd, name),
-        constants.O_RDONLY | constants.O_NOFOLLOW,
-      );
+      const fd = openSync(this.#descriptorPath(parentFd, name), FILE_READ_FLAGS);
       try {
         const stats = fstatSync(fd);
         if (!stats.isFile()) throw new Error("path must be a file");
@@ -211,7 +239,7 @@ export class WorkspaceSandbox {
   ): Promise<T> {
     const target = this.resolve(path);
     const fd = this.#withParent(target, false, (parentFd, name) =>
-      openSync(this.#descriptorPath(parentFd, name), constants.O_RDONLY | constants.O_NOFOLLOW),
+      openSync(this.#descriptorPath(parentFd, name), FILE_READ_FLAGS),
     );
     try {
       if (!fstatSync(fd).isFile()) throw new Error("path must be a file");
@@ -302,19 +330,33 @@ export class WorkspaceSandbox {
   async writeFile(path: string, content: string | Buffer): Promise<void> {
     await this.mutate(() => {
       const target = this.resolve(path, { write: true });
+      const scratchUsage = target.area === "scratch" ? this.scratchUsage() : undefined;
       this.#withParent(target, true, (parentFd, name) => {
         const targetPath = this.#descriptorPath(parentFd, name);
         const temporaryName = `.${name}.${randomUUID()}.tmp`;
         const temporaryPath = this.#descriptorPath(parentFd, temporaryName);
         let mode = 0o600;
+        let replacedBytes = 0;
+        let createsEntry = true;
         try {
           const stats = lstatSync(targetPath);
           if (stats.isSymbolicLink()) {
             throw new Error("symbolic links are not available in Code Mode");
           }
           mode = stats.mode & 0o777;
+          replacedBytes = allocatedBytes(stats);
+          createsEntry = false;
         } catch (error) {
           if (!isFileSystemError(error, "ENOENT")) throw error;
+        }
+        if (scratchUsage !== undefined) {
+          assertProjectedScratchWrite(
+            scratchUsage,
+            this.#maxScratchBytes,
+            replacedBytes,
+            createsEntry,
+            Buffer.byteLength(content),
+          );
         }
         try {
           writeFileSync(temporaryPath, content, { flag: "wx", mode });
@@ -338,10 +380,7 @@ export class WorkspaceSandbox {
     await this.mutate(() => {
       const target = this.resolve(path, { write: true });
       this.#withParent(target, false, (parentFd, name) => {
-        const fd = openSync(
-          this.#descriptorPath(parentFd, name),
-          constants.O_RDONLY | constants.O_NOFOLLOW,
-        );
+        const fd = openSync(this.#descriptorPath(parentFd, name), FILE_READ_FLAGS);
         try {
           fchmodSync(fd, mode);
         } finally {
