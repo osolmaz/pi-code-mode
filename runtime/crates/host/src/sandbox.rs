@@ -83,16 +83,11 @@ pub fn apply_command_sandbox(workspace: &str, scratch: &str) -> anyhow::Result<(
     // Landlock's read set includes EXECUTE, READ_FILE, and READ_DIR.
     // This lets the worker start allowlisted binaries without granting filesystem writes.
     let command_read_access = AccessFs::from_read(abi);
-    let write_paths = [
-        workspace,
-        scratch,
-        "/dev/null",
-        "/dev/ptmx",
-        "/dev/pts",
-        "/dev/tty",
-    ]
-    .into_iter()
-    .filter(|path| std::path::Path::new(path).exists());
+    // PTY descriptors are allocated by the trusted worker before Landlock is applied. Commands
+    // inherit only those descriptors and never receive access to the host's /dev/pts tree.
+    let write_paths = [workspace, scratch, "/dev/null"]
+        .into_iter()
+        .filter(|path| std::path::Path::new(path).exists());
     let status = Ruleset::default()
         .handle_access(AccessFs::from_all(abi))
         .context("failed to select command filesystem rights")?

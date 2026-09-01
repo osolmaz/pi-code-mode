@@ -238,6 +238,7 @@ describe("sandboxed command process", () => {
     const result = await processes.exec({
       cmd: `printf written > command.txt
 python3 - <<'PY'
+import os
 import socket
 try:
     socket.socket()
@@ -249,6 +250,11 @@ try:
     print("host-open")
 except OSError:
     print("host-blocked")
+try:
+    os.listdir("/dev/pts")
+    print("host-ptys-open")
+except OSError:
+    print("host-ptys-blocked")
 PY`,
       yield_time_ms: 2_000,
     });
@@ -256,6 +262,7 @@ PY`,
     expect(result.exit_code).toBe(0);
     expect(result.output).toContain("network-blocked 1");
     expect(result.output).toContain("host-blocked");
+    expect(result.output).toContain("host-ptys-blocked");
     expect(readFileSync(join(root, "command.txt"), "utf8")).toBe("written");
   });
 
@@ -335,6 +342,23 @@ PY`,
     });
     expect(completed.exit_code).toBe(0);
     expect(completed.output).toBe("got:hello\n");
+  });
+
+  it("relays standard input through a broker-owned PTY", async () => {
+    const initial = await processes.exec({
+      cmd: 'read line; printf "pty:%s\\n" "$line"',
+      tty: true,
+      yield_time_ms: 250,
+    });
+    expect(initial.session_id).toBeTypeOf("number");
+
+    const completed = await processes.write({
+      session_id: initial.session_id,
+      chars: "hello\n",
+      yield_time_ms: 2_000,
+    });
+    expect(completed.exit_code).toBe(0);
+    expect(completed.output).toContain("pty:hello");
   });
 
   it("truncates output and covers TTY, abort, and closed-session handling", async () => {
@@ -485,6 +509,27 @@ while :; do sleep 1; done`,
     await expect(processes.exec({ cmd: "true" })).rejects.toThrow("closed");
   });
 
+  it("allows normal Git metadata and blocks embedded Git credentials", async () => {
+    mkdirSync(join(root, ".git"));
+    writeFileSync(
+      join(root, ".git", "config"),
+      '[remote "origin"]\n\turl = https://github.com/osolmaz/pi-code-mode.git\n',
+    );
+    expect(workspace.readFile(".git/config").toString()).toContain("github.com");
+    await expect(processes.exec({ cmd: "true", yield_time_ms: 2_000 })).resolves.toMatchObject({
+      exit_code: 0,
+    });
+
+    writeFileSync(
+      join(root, ".git", "config"),
+      '[remote "origin"]\n\turl = https://secret-token@github.com/osolmaz/private.git\n',
+    );
+    expect(() => workspace.readFile(".git/config")).toThrow("credential-bearing Git");
+    await expect(processes.exec({ cmd: "true" })).rejects.toThrow(
+      "credential-bearing Git configuration",
+    );
+  });
+
   it("refuses commands while a sensitive workspace path exists", async () => {
     mkdirSync(join(root, "node_modules", "package"), { recursive: true });
     writeFileSync(join(root, "node_modules", "package", ".env"), "SECRET=value\n");
@@ -515,9 +560,14 @@ describe("nested SDK paths", () => {
         replay: "safe",
         invoke: async (input) => ({ input, ok: true }),
       };
-      const broker = new CodeModeBroker(root, [descriptor]);
+      const bracketDescriptor = {
+        ...descriptor,
+        id: "fixture.search",
+        sdkPath: ["fixture", "issue.search"],
+      };
+      const broker = new CodeModeBroker(root, [descriptor, bracketDescriptor]);
       const result = await session.exec(
-        "text({frozen:Object.isFrozen(tools.fixture), value:await tools.fixture.read({x:1}), names:ALL_TOOLS.map(x=>x.name)});",
+        "text({frozen:Object.isFrozen(tools.fixture), value:await tools.fixture.read({x:1}), bracket:await tools.fixture['issue.search']({x:2}), names:ALL_TOOLS.map(x=>x.name)});",
         "nested-path",
         broker,
         resolveLimits(),
@@ -527,7 +577,8 @@ describe("nested SDK paths", () => {
       expect(value).toEqual({
         frozen: true,
         value: { input: { x: 1 }, ok: true },
-        names: ["fixture.read"],
+        bracket: { input: { x: 2 }, ok: true },
+        names: ["fixture.read", "fixture.issue.search"],
       });
     } finally {
       await session.close();

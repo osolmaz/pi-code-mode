@@ -21,7 +21,7 @@ pub fn validate_exec(params: &CellExecParams) -> Result<(), ProtocolError> {
         ));
     }
     let mut ids = HashSet::new();
-    let mut paths: HashSet<String> = HashSet::new();
+    let mut paths: Vec<Vec<String>> = Vec::new();
     for tool in &params.tools {
         validate_id(&tool.id, "tool id")?;
         if !ids.insert(tool.id.as_str()) {
@@ -39,18 +39,16 @@ pub fn validate_exec(params: &CellExecParams) -> Result<(), ProtocolError> {
         for segment in &tool.sdk_path {
             validate_path_segment(segment)?;
         }
-        let path = tool.sdk_path.join(".");
-        if paths.iter().any(|existing| {
-            existing == &path
-                || existing.starts_with(&format!("{path}."))
-                || path.starts_with(&format!("{existing}."))
-        }) {
+        if paths
+            .iter()
+            .any(|existing| paths_collide(existing, &tool.sdk_path))
+        {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidInput,
                 "Code Mode tool paths must not collide",
             ));
         }
-        paths.insert(path);
+        paths.push(tool.sdk_path.clone());
     }
     Ok(())
 }
@@ -67,13 +65,17 @@ pub fn validate_wait(params: &CellWaitParams) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+fn paths_collide(left: &[String], right: &[String]) -> bool {
+    left.iter()
+        .zip(right)
+        .take(left.len().min(right.len()))
+        .all(|(left, right)| left == right)
+}
+
 fn validate_path_segment(value: &str) -> Result<(), ProtocolError> {
-    let mut chars = value.chars();
-    let first = chars.next();
-    let valid = matches!(first, Some('_' | '$' | 'a'..='z' | 'A'..='Z'))
-        && chars.all(|character| {
-            character == '_' || character == '$' || character.is_ascii_alphanumeric()
-        })
+    let valid = !value.is_empty()
+        && value.len() <= 128
+        && !value.chars().any(char::is_control)
         && !matches!(value, "__proto__" | "constructor" | "prototype");
     if !valid {
         return Err(ProtocolError::new(

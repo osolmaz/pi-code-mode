@@ -4,7 +4,6 @@ import type { TSchema } from "typebox";
 import type { CodeModeMode } from "../core/mode.js";
 import type { CodeModeInvocationContext, CodeModeToolDescriptor, ToolEffect } from "./types.js";
 
-const SAFE_SEGMENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/u;
 const RESERVED_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
 const MAX_REPLAY_ENTRIES = 4_096;
 
@@ -40,8 +39,22 @@ export type CodeModeBrokerOptions = {
   replayCache?: CodeModeReplayCache;
 };
 
+function isSafeSegment(segment: string): boolean {
+  if (segment.length === 0 || segment.length > 128) return false;
+  for (let index = 0; index < segment.length; index += 1) {
+    const code = segment.charCodeAt(index);
+    if (code < 32 || code === 127) return false;
+  }
+  return true;
+}
+
 function pathName(path: readonly string[]): string {
   return path.join(".");
+}
+
+function pathCollides(left: readonly string[], right: readonly string[]): boolean {
+  const shared = Math.min(left.length, right.length);
+  return left.slice(0, shared).every((segment, index) => segment === right[index]);
 }
 
 function assertDescriptor(descriptor: CodeModeToolDescriptor): void {
@@ -50,7 +63,7 @@ function assertDescriptor(descriptor: CodeModeToolDescriptor): void {
     throw new Error(`Code Mode tool path must not be empty: ${descriptor.id}`);
   }
   for (const segment of descriptor.sdkPath) {
-    if (!SAFE_SEGMENT.test(segment) || RESERVED_SEGMENTS.has(segment)) {
+    if (!isSafeSegment(segment) || RESERVED_SEGMENTS.has(segment)) {
       throw new Error(`invalid Code Mode tool path segment: ${segment}`);
     }
   }
@@ -76,7 +89,7 @@ export class CodeModeBroker {
       options.allowedEffects ?? ["read", "write", "execute", "interactive"],
     );
     const byId = new Map<string, CodeModeToolDescriptor>();
-    const paths = new Set<string>();
+    const paths: string[][] = [];
     for (const descriptor of descriptors) {
       assertDescriptor(descriptor);
       if (!descriptor.modes.includes(mode)) continue;
@@ -87,15 +100,10 @@ export class CodeModeBroker {
       }
       if (byId.has(descriptor.id)) throw new Error(`duplicate Code Mode tool id: ${descriptor.id}`);
       const path = pathName(descriptor.sdkPath);
-      if (
-        paths.has(path) ||
-        [...paths].some(
-          (existing) => existing.startsWith(`${path}.`) || path.startsWith(`${existing}.`),
-        )
-      ) {
+      if (paths.some((existing) => pathCollides(existing, descriptor.sdkPath))) {
         throw new Error(`colliding Code Mode tool path: ${path}`);
       }
-      paths.add(path);
+      paths.push([...descriptor.sdkPath]);
       byId.set(
         descriptor.id,
         Object.freeze({

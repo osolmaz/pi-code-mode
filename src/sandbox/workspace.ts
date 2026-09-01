@@ -25,7 +25,12 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 
-import { assertSafePathParts } from "./sensitive-path.js";
+import {
+  MAX_GIT_CONFIG_BYTES,
+  assertSafeGitConfig,
+  assertSafePathParts,
+  isGitCredentialConfigPath,
+} from "./sensitive-path.js";
 import {
   DEFAULT_MAX_SCRATCH_BYTES,
   allocatedBytes,
@@ -185,7 +190,9 @@ export class WorkspaceSandbox {
         if (stats.size > maxBytes) {
           throw new Error(`file exceeds the ${String(maxBytes)}-byte Code Mode read limit`);
         }
-        return readFileSync(fd);
+        const content = readFileSync(fd);
+        if (target.area === "workspace") assertSafeGitConfig(target.display, content);
+        return content;
       } finally {
         closeSync(fd);
       }
@@ -281,7 +288,17 @@ export class WorkspaceSandbox {
         } catch {
           continue;
         }
-        if (stats.isDirectory() && !stats.isSymbolicLink()) pending.push(path);
+        if (stats.isDirectory() && !stats.isSymbolicLink()) {
+          pending.push(path);
+        } else if (stats.isFile() && isGitCredentialConfigPath(rel)) {
+          try {
+            this.readFile(rel, MAX_GIT_CONFIG_BYTES);
+          } catch {
+            throw new Error(
+              `sandboxed commands are disabled while credential-bearing Git configuration exists: ${rel}`,
+            );
+          }
+        }
       }
     }
   }
