@@ -480,7 +480,8 @@ Limits apply at four levels.
 - CPU, memory, file-size, and open-file limits;
 - output and input-write limits;
 - at most 16 unpolled completed records and 32 MiB of their retained output, with a 60-second expiry;
-- process-group `SIGTERM` followed by guaranteed `SIGKILL` escalation after two seconds.
+- process-group `SIGTERM` followed by guaranteed `SIGKILL` escalation after two seconds;
+- seccomp denial of `setsid` and `setpgid`, which prevents descendants from leaving the managed process group.
 
 The parent sends each worker's trusted workspace, scratch, working-directory, and limit configuration as one newline-terminated JSON record over the worker's private standard-input pipe. The worker consumes that record before the command inherits the remaining pipe. Command-writable files never carry sandbox authority.
 

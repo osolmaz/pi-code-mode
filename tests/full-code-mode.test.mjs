@@ -227,6 +227,16 @@ PY`,
     expect(readFileSync(join(root, "command.txt"), "utf8")).toBe("written");
   });
 
+  it("blocks commands from escaping cleanup through a detached session", async () => {
+    const result = await processes.exec({
+      cmd: "setsid sh -c 'sleep 0.4; printf escaped > detached.txt' >/dev/null 2>&1 &",
+      yield_time_ms: 2_000,
+    });
+    expect(result.exit_code).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(workspace.exists("detached.txt")).toBe(false);
+  });
+
   it("uses the private scratch directory as a command workdir", async () => {
     const result = await processes.exec({
       cmd: "pwd; printf scratch > command-scratch.txt",
