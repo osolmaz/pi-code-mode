@@ -182,7 +182,7 @@ function createSandboxedPowerShellTool(
     execute(callId, rawInput, signal) {
       const input = rawInput as unknown as { command: string; timeout?: number };
       const command = `command -v pwsh >/dev/null || { printf '%s\\n' 'PowerShell is not installed' >&2; exit 127; }
-DOTNET_GCHeapHardLimit=0x20000000 pwsh -NoProfile -NonInteractive -Command ${shellQuote(input.command)} || { status=$?; if [ "$status" -eq 126 ]; then printf '%s\\n' 'PowerShell is not installed or is unavailable in the sandbox' >&2; exit 127; fi; exit "$status"; }`;
+DOTNET_GCHeapHardLimit=0x20000000 DOTNET_GCRegionRange=0x40000000 pwsh -NoProfile -NonInteractive -Command ${shellQuote(input.command)} || { status=$?; if [ "$status" -eq 126 ]; then printf '%s\\n' 'PowerShell is not installed or is unavailable in the sandbox' >&2; exit 127; fi; exit "$status"; }`;
       return bash.execute(callId, { ...input, command } as never, signal);
     },
   };
