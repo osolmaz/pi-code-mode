@@ -60,6 +60,7 @@ type ManagedProcess = {
   lifetimeTimer?: NodeJS.Timeout;
   terminationTimer?: NodeJS.Timeout;
   evictionTimer?: NodeJS.Timeout;
+  outputListeners: Set<(data: Buffer) => void>;
 };
 
 export type SandboxedProcessManagerOptions = {
@@ -170,10 +171,19 @@ export class SandboxedProcessManager {
     };
   }
 
+  async exec(input: ExecCommandInput, signal?: AbortSignal): Promise<CommandResult> {
+    return this.#exec(input, signal);
+  }
+
   // Command validation keeps each option and sandbox preflight independent.
   // eslint-disable-next-line complexity
-  async exec(input: ExecCommandInput, signal?: AbortSignal): Promise<CommandResult> {
+  async #exec(
+    input: ExecCommandInput,
+    signal?: AbortSignal,
+    onData?: (data: Buffer) => void,
+  ): Promise<CommandResult> {
     this.#assertOpen();
+    signal?.throwIfAborted();
     if (typeof input.cmd !== "string" || input.cmd.length === 0) {
       throw new Error("cmd must be a non-empty string");
     }
@@ -187,7 +197,7 @@ export class SandboxedProcessManager {
     if (!this.#workspace.stat(workdir.absolute).isDirectory()) {
       throw new Error("workdir must be a directory");
     }
-    const managed = this.#spawn(input.cmd, workdir.absolute, input.tty ?? false);
+    const managed = this.#spawn(input.cmd, workdir.absolute, input.tty ?? false, onData);
     const onAbort = (): void => {
       this.#terminate(managed);
     };
@@ -225,17 +235,16 @@ export class SandboxedProcessManager {
     );
     const signal = signals.length === 0 ? undefined : AbortSignal.any(signals);
     try {
-      let result = await this.exec(
+      let result = await this.#exec(
         { cmd: command, workdir: cwd, tty: false, yield_time_ms: MAX_YIELD_MS },
         signal,
+        options.onData,
       );
-      if (result.output.length > 0) options.onData(Buffer.from(result.output));
       while (result.session_id !== undefined) {
         result = await this.write(
           { session_id: result.session_id, chars: "", yield_time_ms: MAX_YIELD_MS },
           signal,
         );
-        if (result.output.length > 0) options.onData(Buffer.from(result.output));
       }
       return { exitCode: result.exit_code ?? null };
     } catch (error) {
@@ -294,7 +303,12 @@ export class SandboxedProcessManager {
     this.#processes.clear();
   }
 
-  #spawn(command: string, cwd: string, tty: boolean): ManagedProcess {
+  #spawn(
+    command: string,
+    cwd: string,
+    tty: boolean,
+    onData?: (data: Buffer) => void,
+  ): ManagedProcess {
     const activeProcesses = [...this.#processes.values()].filter(
       (process) => !process.closed,
     ).length;
@@ -331,6 +345,7 @@ export class SandboxedProcessManager {
       outputBytes: 0,
       cursor: 0,
       closed: false,
+      outputListeners: new Set(onData === undefined ? [] : [onData]),
     };
     this.#processes.set(id, managed);
     managed.lifetimeTimer = setTimeout(() => {
@@ -348,6 +363,7 @@ export class SandboxedProcessManager {
       managed.closed = true;
       managed.exitCode = code ?? (signal === null ? 1 : 128);
       if (managed.lifetimeTimer !== undefined) clearTimeout(managed.lifetimeTimer);
+      managed.outputListeners.clear();
       this.#retainCompleted(managed);
     });
     child.stdin.write(`${config}\n`, (error) => {
@@ -360,6 +376,7 @@ export class SandboxedProcessManager {
   }
 
   #append(process: ManagedProcess, chunk: Buffer): void {
+    for (const listener of process.outputListeners) listener(chunk);
     const text = chunk.toString("utf8");
     process.output += text;
     process.outputBytes += chunk.length;

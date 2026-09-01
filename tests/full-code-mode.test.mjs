@@ -131,6 +131,7 @@ done`,
     expect(readFileSync(join(root, "one.txt"), "utf8")).toBe("new\n");
     expect(readFileSync(join(root, "two.txt"), "utf8")).toBe("second\n");
 
+    writeFileSync(join(root, "executable.sh"), "#!/bin/sh\n", { mode: 0o755 });
     await expect(
       applyPatch(
         workspace,
@@ -139,11 +140,17 @@ done`,
 @@
 -new
 +broken
+*** Delete File: executable.sh
+*** Add File: created/inside.txt
++temporary
 *** Delete File: missing.txt
 *** End Patch`,
       ),
     ).rejects.toThrow("does not exist");
     expect(readFileSync(join(root, "one.txt"), "utf8")).toBe("new\n");
+    expect(readFileSync(join(root, "executable.sh"), "utf8")).toBe("#!/bin/sh\n");
+    expect(workspace.stat("executable.sh").mode & 0o777).toBe(0o755);
+    expect(workspace.exists("created")).toBe(false);
   });
   it("parses delete, move, insertion, and malformed Codex patch cases", async () => {
     writeFileSync(join(root, "move.txt"), "first\nlast");
@@ -259,7 +266,11 @@ PY`,
 
     const controller = new AbortController();
     controller.abort();
-    await expect(processes.exec({ cmd: "sleep 5" }, controller.signal)).rejects.toThrow();
+    await expect(
+      processes.exec({ cmd: "printf aborted > should-not-exist.txt" }, controller.signal),
+    ).rejects.toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(workspace.exists("should-not-exist.txt")).toBe(false);
 
     const running = await processes.exec({ cmd: "sleep 0.4", yield_time_ms: 250 });
     expect(running.session_id).toBeTypeOf("number");

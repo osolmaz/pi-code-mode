@@ -82,7 +82,7 @@ Pi mode mirrors the active vanilla Pi built-ins for that session. A normal sessi
 - `tools.edit`;
 - `tools.write`.
 
-If the matching vanilla Pi built-ins are active when the session starts, Pi Code Mode can also provide `powershell`, `grep`, `find`, and `ls`. Pi mode keeps Pi's names, input schemas, result objects, errors, and one-shot shell behavior. Codex process-session controls do not appear in Pi mode.
+If the matching vanilla Pi built-ins are active when the session starts, Pi Code Mode can also provide `powershell`, `grep`, `find`, and `ls`. Pi mode keeps Pi's names, input schemas, result objects, errors, and one-shot shell behavior. Codex process-session controls do not appear in Pi mode. Large Bash output uses Pi's display limits, but earlier output is discarded instead of being saved in the operating system's temporary directory.
 
 ## JavaScript cells
 

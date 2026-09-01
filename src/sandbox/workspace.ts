@@ -4,6 +4,7 @@ import {
   closeSync,
   constants,
   existsSync,
+  fchmodSync,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -13,6 +14,7 @@ import {
   readdirSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -306,6 +308,23 @@ export class WorkspaceSandbox {
     });
   }
 
+  async chmod(path: string, mode: number): Promise<void> {
+    await this.mutate(() => {
+      const target = this.resolve(path, { write: true });
+      this.#withParent(target, false, (parentFd, name) => {
+        const fd = openSync(
+          this.#descriptorPath(parentFd, name),
+          constants.O_RDONLY | constants.O_NOFOLLOW,
+        );
+        try {
+          fchmodSync(fd, mode);
+        } finally {
+          closeSync(fd);
+        }
+      });
+    });
+  }
+
   async remove(path: string, recursive = false): Promise<void> {
     await this.mutate(() => {
       const target = this.resolve(path, { write: true });
@@ -313,7 +332,12 @@ export class WorkspaceSandbox {
         throw new Error("cannot remove a sandbox root");
       }
       this.#withParent(target, false, (parentFd, name) => {
-        rmSync(this.#descriptorPath(parentFd, name), { recursive, force: false });
+        const descriptorPath = this.#descriptorPath(parentFd, name);
+        if (!recursive && lstatSync(descriptorPath).isDirectory()) {
+          rmdirSync(descriptorPath);
+        } else {
+          rmSync(descriptorPath, { recursive, force: false });
+        }
       });
     });
   }
