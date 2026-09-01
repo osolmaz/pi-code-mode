@@ -160,11 +160,25 @@ describe("Pi mode built-ins", () => {
       context(),
     );
     expect(text(find)).toContain("one.txt");
+    const nestedFind = await broker.invoke(
+      "pi.find",
+      { path: ".", pattern: "*.ts", limit: 10 },
+      context(),
+    );
+    expect(text(nestedFind)).toContain("src/two.ts");
 
     const ls = await broker.invoke("pi.ls", { path: ".", limit: 2 }, context());
     expect(ls.details.entryLimitReached).toBe(2);
     const directoryList = await broker.invoke("pi.ls", { path: ".", limit: 10 }, context());
     expect(text(directoryList)).toContain("src/");
+
+    mkdirSync(join(root, "many"));
+    for (let index = 0; index < 501; index += 1) {
+      writeFileSync(join(root, "many", `${String(index).padStart(3, "0")}.txt`), "");
+    }
+    const defaultList = await broker.invoke("pi.ls", { path: "many" }, context());
+    expect(text(defaultList).split("\n")).toHaveLength(500);
+    expect(defaultList.details.entryLimitReached).toBe(500);
 
     await expect(broker.invoke("pi.ls", { path: ".", limit: 0 }, context())).rejects.toThrow(
       "limit must be",

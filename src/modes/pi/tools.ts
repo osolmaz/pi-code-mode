@@ -1,4 +1,4 @@
-import { join, matchesGlob, relative, sep } from "node:path";
+import { basename, join, matchesGlob, relative, sep } from "node:path";
 
 import {
   DEFAULT_MAX_BYTES,
@@ -363,7 +363,7 @@ function optionalTool(
       execute: (_callId, value) => {
         const input = recordInput(value);
         const path = stringInput(input, "path", ".");
-        const limit = positiveLimit(input["limit"]);
+        const limit = positiveLimit(input["limit"], 500);
         const entries = workspace.readdir(path).slice(0, limit);
         const lines = entries.map((entry) =>
           workspace.stat(join(workspace.resolve(path).absolute, entry)).isDirectory()
@@ -400,7 +400,7 @@ function optionalTool(
         const base = workspace.resolve(path).absolute;
         const matches = walkFiles(workspace, path)
           .map((file) => relative(base, file).split(sep).join("/"))
-          .filter((file) => matchesGlob(file, pattern))
+          .filter((file) => matchesGlob(pattern.includes("/") ? file : basename(file), pattern))
           .slice(0, limit);
         return Promise.resolve(
           textResult(matches.join("\n"), {
