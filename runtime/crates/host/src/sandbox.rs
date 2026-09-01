@@ -123,6 +123,8 @@ pub fn apply_command_sandbox(workspace: &str, scratch: &str) -> anyhow::Result<(
         libc::SYS_chroot,
         libc::SYS_setns,
         libc::SYS_unshare,
+        libc::SYS_setsid,
+        libc::SYS_setpgid,
     ])
 }
 
