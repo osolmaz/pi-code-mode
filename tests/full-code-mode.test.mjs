@@ -276,6 +276,13 @@ PY`,
     expect(workspace.exists("detached.txt")).toBe(false);
   });
 
+  it("reaps background descendants that retain command pipes", async () => {
+    const result = await processes.exec({ cmd: "sleep 999 &", yield_time_ms: 2_000 });
+
+    expect(result.exit_code).toBe(0);
+    expect(result.wall_time_seconds).toBeLessThan(2);
+  });
+
   it("kills redirected background descendants before reporting completion", async () => {
     const result = await processes.exec({
       cmd: "(sleep 0.4; printf escaped > delayed.txt) </dev/null >/dev/null 2>&1 &",
@@ -342,6 +349,22 @@ PY`,
     });
     expect(completed.exit_code).toBe(0);
     expect(completed.output).toBe("got:hello\n");
+  });
+
+  it("preserves UTF-8 characters split across output chunks", async () => {
+    const result = await processes.exec({
+      cmd: `python3 - <<'PY'
+import os
+import time
+os.write(1, b"\\xe2\\x82")
+time.sleep(0.1)
+os.write(1, b"\\xac")
+PY`,
+      yield_time_ms: 2_000,
+    });
+
+    expect(result.exit_code).toBe(0);
+    expect(result.output).toBe("€");
   });
 
   it("relays standard input through a broker-owned PTY", async () => {

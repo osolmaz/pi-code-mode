@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import type { Writable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 
 import { resolveHostBinary } from "../host/binary.js";
 import type { WorkspaceSandbox } from "./workspace.js";
@@ -56,6 +57,9 @@ type ManagedProcess = {
   output: string;
   outputBytes: number;
   outputLimitExceeded: boolean;
+  outputDecodersFlushed: boolean;
+  stdoutDecoder: StringDecoder;
+  stderrDecoder: StringDecoder;
   cursor: number;
   exitCode?: number;
   closed: boolean;
@@ -359,6 +363,9 @@ export class SandboxedProcessManager {
       output: "",
       outputBytes: 0,
       outputLimitExceeded: false,
+      outputDecodersFlushed: false,
+      stdoutDecoder: new StringDecoder("utf8"),
+      stderrDecoder: new StringDecoder("utf8"),
       cursor: 0,
       closed: false,
       outputListeners: new Set(onData === undefined ? [] : [onData]),
@@ -367,19 +374,26 @@ export class SandboxedProcessManager {
     managed.lifetimeTimer = setTimeout(() => {
       this.#terminate(managed);
     }, this.#options.wallTimeLimitMs);
-    const append = (chunk: Buffer): void => {
-      this.#append(managed, chunk);
-    };
-    child.stdout.on("data", append);
-    child.stderr.on("data", append);
+    child.stdout.on("data", (chunk: Buffer) => {
+      this.#append(managed, chunk, managed.stdoutDecoder);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      this.#append(managed, chunk, managed.stderrDecoder);
+    });
     child.once("error", (error) => {
       this.#append(managed, Buffer.from(`command worker failed: ${error.message}\n`));
+    });
+    child.once("exit", () => {
+      // The worker can exit while a background descendant keeps its inherited pipes open.
+      // Kill the group on worker exit so Node can deliver close and release the command slot.
+      this.#signalGroup(managed, "SIGKILL");
     });
     child.once("close", (code, signal) => {
       // A background descendant can close every inherited pipe and outlive the worker. Session
       // creation and process-group changes are denied, so one final group kill removes it before
       // this command is reported as complete.
       this.#signalGroup(managed, "SIGKILL");
+      this.#flushOutputDecoders(managed);
       const scratchExceeded = this.#enforceScratchLimit();
       managed.closed = true;
       managed.exitCode = scratchExceeded ? 1 : (code ?? (signal === null ? 1 : 128));
@@ -397,23 +411,31 @@ export class SandboxedProcessManager {
     return managed;
   }
 
-  #append(process: ManagedProcess, chunk: Buffer): void {
+  #append(process: ManagedProcess, chunk: Buffer, decoder?: StringDecoder): void {
     const remaining = Math.max(0, MAX_TOTAL_OUTPUT_BYTES - process.outputBytes);
     const accepted = chunk.subarray(0, remaining);
     if (accepted.length > 0) {
       for (const listener of process.outputListeners) listener(accepted);
-      process.output += accepted.toString("utf8");
+      process.output += decoder?.write(accepted) ?? accepted.toString("utf8");
     }
     process.outputBytes += chunk.length;
     if (accepted.length === chunk.length || process.outputLimitExceeded) return;
 
     process.outputLimitExceeded = true;
+    this.#flushOutputDecoders(process);
     const notice = Buffer.from(
       `\n[command terminated after exceeding the ${String(MAX_TOTAL_OUTPUT_BYTES)}-byte output limit]\n`,
     );
     for (const listener of process.outputListeners) listener(notice);
     process.output += notice.toString("utf8");
     this.#terminate(process);
+  }
+
+  #flushOutputDecoders(process: ManagedProcess): void {
+    if (process.outputDecodersFlushed) return;
+    process.outputDecodersFlushed = true;
+    process.output += process.stdoutDecoder.end();
+    process.output += process.stderrDecoder.end();
   }
 
   async #wait(process: ManagedProcess, milliseconds: number): Promise<void> {
