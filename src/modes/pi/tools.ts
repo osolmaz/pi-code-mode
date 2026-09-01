@@ -1,4 +1,4 @@
-import { join, matchesGlob, relative, sep } from "node:path";
+import { basename, join, matchesGlob, relative, sep } from "node:path";
 
 import {
   DEFAULT_MAX_BYTES,
@@ -294,6 +294,7 @@ function optionalTool(
       properties: {
         pattern: { type: "string" },
         path: { type: "string" },
+        glob: { type: "string" },
         ignoreCase: { type: "boolean" },
         literal: { type: "boolean" },
         context: { type: "number" },
@@ -308,32 +309,48 @@ function optionalTool(
       const input = recordInput(value);
       const path = stringInput(input, "path", ".");
       const pattern = stringInput(input, "pattern");
-      const limit = positiveLimit(input["limit"]);
+      const limit = positiveLimit(input["limit"], 100);
+      const context =
+        typeof input["context"] === "number" && input["context"] > 0
+          ? Math.floor(input["context"])
+          : 0;
+      const glob = input["glob"] === undefined ? undefined : stringInput(input, "glob");
       const flags = input["ignoreCase"] === true ? "iu" : "u";
       const expression =
         input["literal"] === true
           ? new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), flags)
           : new RegExp(pattern, flags);
       const base = workspace.resolve(path).absolute;
-      const files = workspace.stat(path).isFile() ? [base] : walkFiles(workspace, path);
+      const singleFile = workspace.stat(path).isFile();
+      const files = singleFile ? [base] : walkFiles(workspace, path);
       const matches: string[] = [];
+      let matchCount = 0;
       for (const file of files) {
+        const display = singleFile ? basename(file) : relative(base, file).split(sep).join("/");
+        if (glob !== undefined && !matchesGlob(display, glob) && !matchesGlob(basename(file), glob))
+          continue;
         const content = workspace.readFile(file);
         if (content.includes(0)) continue;
-        for (const [index, line] of content.toString("utf8").split(/\r?\n/u).entries()) {
+        const lines = content.toString("utf8").split(/\r?\n/u);
+        for (const [index, line] of lines.entries()) {
           expression.lastIndex = 0;
-          if (expression.test(line)) {
+          if (!expression.test(line)) continue;
+          matchCount += 1;
+          const start = Math.max(0, index - context);
+          const end = Math.min(lines.length - 1, index + context);
+          for (let contextIndex = start; contextIndex <= end; contextIndex += 1) {
+            const separator = contextIndex === index ? ":" : "-";
             matches.push(
-              `${relative(base, file).split(sep).join("/")}:${String(index + 1)}:${line}`,
+              `${display}${separator}${String(contextIndex + 1)}${separator} ${lines[contextIndex] ?? ""}`,
             );
           }
-          if (matches.length >= limit) break;
+          if (matchCount >= limit) break;
         }
-        if (matches.length >= limit) break;
+        if (matchCount >= limit) break;
       }
       return Promise.resolve(
         textResult(matches.join("\n"), {
-          matchLimitReached: matches.length === limit ? limit : undefined,
+          matchLimitReached: matchCount === limit ? limit : undefined,
         }),
       );
     },

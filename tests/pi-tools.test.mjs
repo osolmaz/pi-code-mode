@@ -100,7 +100,7 @@ describe("Pi mode built-ins", () => {
       { path: ".", pattern: "ALPHA", ignoreCase: true, literal: true, limit: 10 },
       context(),
     );
-    expect(text(grep)).toContain("one.txt:1:alpha");
+    expect(text(grep)).toContain("one.txt:1: alpha");
     expect(text(grep)).toContain("src/two.ts:1:");
     expect(text(grep)).not.toContain("ignored.ts");
     const regexGrep = await broker.invoke(
@@ -108,8 +108,24 @@ describe("Pi mode built-ins", () => {
       { path: "one.txt", pattern: "^a", literal: false, limit: 1 },
       context(),
     );
-    expect(text(regexGrep)).toContain(":1:alpha");
+    expect(text(regexGrep)).toContain(":1: alpha");
     expect(regexGrep.details.matchLimitReached).toBe(1);
+
+    const filteredGrep = await broker.invoke(
+      "pi.grep",
+      { path: ".", pattern: "alpha", glob: "*.ts", context: 1, limit: 10 },
+      context(),
+    );
+    expect(text(filteredGrep)).toContain("src/two.ts:1: const value");
+    expect(text(filteredGrep)).not.toContain("one.txt");
+
+    const contextGrep = await broker.invoke(
+      "pi.grep",
+      { path: "one.txt", pattern: "beta", context: 1, limit: 10 },
+      context(),
+    );
+    expect(text(contextGrep)).toContain("one.txt-1- alpha");
+    expect(text(contextGrep)).toContain("one.txt:2: beta");
 
     const find = await broker.invoke(
       "pi.find",
