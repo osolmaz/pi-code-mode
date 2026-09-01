@@ -83,6 +83,20 @@ export function assertScratchUsage(usage: ScratchUsage, maxScratchBytes: number)
   }
 }
 
+export function assertProjectedScratchDirectories(
+  usage: ScratchUsage,
+  maxScratchBytes: number,
+  directoryCount: number,
+): void {
+  assertScratchUsage(
+    {
+      bytes: usage.bytes + directoryCount * 4_096,
+      entries: usage.entries + directoryCount,
+    },
+    maxScratchBytes,
+  );
+}
+
 export function assertProjectedScratchWrite(
   usage: ScratchUsage,
   maxScratchBytes: number,

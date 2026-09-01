@@ -25,9 +25,11 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 
+import { assertSafePathParts } from "./sensitive-path.js";
 import {
   DEFAULT_MAX_SCRATCH_BYTES,
   allocatedBytes,
+  assertProjectedScratchDirectories,
   assertProjectedScratchWrite,
   assertScratchUsage,
   measureScratchUsage,
@@ -35,33 +37,6 @@ import {
   type ScratchUsage,
 } from "./scratch-quota.js";
 
-const SENSITIVE_NAMES = new Set([
-  ".aws",
-  ".azure",
-  ".direnv",
-  ".docker",
-  ".env",
-  ".envrc",
-  ".git-credentials",
-  ".gnupg",
-  ".kube",
-  ".netrc",
-  ".npmrc",
-  ".pypirc",
-  ".ssh",
-  "application_default_credentials.json",
-  "auth.json",
-  "credentials",
-  "credentials.json",
-  "gcloud",
-  "secrets",
-  "secrets.json",
-  "service-account.json",
-  "token",
-  "tokens.json",
-]);
-const SENSITIVE_PREFIXES = [".env.", "id_dsa", "id_ed25519", "id_ecdsa", "id_rsa"];
-const SENSITIVE_SUFFIXES = [".key", ".p12", ".pem", ".pfx"];
 const MAX_PATH_BYTES = 16 * 1024;
 const DEFAULT_MAX_READ_BYTES = 16 * 1024 * 1024;
 const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
@@ -76,22 +51,6 @@ export type ResolvedSandboxPath = {
 function isInside(root: string, target: string): boolean {
   const rel = relative(root, target);
   return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
-}
-
-function assertSafeParts(path: string): void {
-  const parts = path.split(/[\\/]/u).filter(Boolean);
-  for (const part of parts) {
-    const normalized = part.toLocaleLowerCase();
-    if (
-      SENSITIVE_NAMES.has(normalized) ||
-      SENSITIVE_PREFIXES.some(
-        (prefix) => normalized === prefix || normalized.startsWith(`${prefix}.`),
-      ) ||
-      SENSITIVE_SUFFIXES.some((suffix) => normalized.endsWith(suffix))
-    ) {
-      throw new Error(`sensitive path is not available in Code Mode: ${part}`);
-    }
-  }
 }
 
 function isFileSystemError(error: unknown, code: string): boolean {
@@ -184,7 +143,7 @@ export class WorkspaceSandbox {
             ? resolve(input)
             : resolve(base, input);
     if (!isInside(base, absolute)) throw new Error("path escapes the Code Mode sandbox");
-    if (area === "workspace") assertSafeParts(relative(base, absolute));
+    if (area === "workspace") assertSafePathParts(relative(base, absolute));
 
     const existing = nearestExisting(absolute);
     const realExisting = realpathSync(existing);
@@ -311,7 +270,7 @@ export class WorkspaceSandbox {
         if (scanned > maxEntries) throw new Error("workspace is too large for command safety scan");
         const rel = relative(this.#root, join(directory, name));
         try {
-          assertSafeParts(rel);
+          assertSafePathParts(rel);
         } catch {
           throw new Error(`sandboxed commands are disabled while a sensitive path exists: ${rel}`);
         }
@@ -330,8 +289,19 @@ export class WorkspaceSandbox {
   async writeFile(path: string, content: string | Buffer): Promise<void> {
     await this.mutate(() => {
       const target = this.resolve(path, { write: true });
-      const scratchUsage = target.area === "scratch" ? this.scratchUsage() : undefined;
+      if (target.area === "scratch") {
+        const usage = this.scratchUsage();
+        assertScratchUsage(usage, this.#maxScratchBytes);
+        const parentParts = this.#parts(target);
+        parentParts.pop();
+        assertProjectedScratchDirectories(
+          usage,
+          this.#maxScratchBytes,
+          this.#missingDirectoryCount(target.area, parentParts),
+        );
+      }
       this.#withParent(target, true, (parentFd, name) => {
+        const scratchUsage = target.area === "scratch" ? this.scratchUsage() : undefined;
         const targetPath = this.#descriptorPath(parentFd, name);
         const temporaryName = `.${name}.${randomUUID()}.tmp`;
         const temporaryPath = this.#descriptorPath(parentFd, temporaryName);
@@ -372,7 +342,17 @@ export class WorkspaceSandbox {
   async mkdir(path: string): Promise<void> {
     await this.mutate(() => {
       const target = this.resolve(path, { write: true });
+      if (target.area === "scratch") {
+        const usage = this.scratchUsage();
+        assertScratchUsage(usage, this.#maxScratchBytes);
+        assertProjectedScratchDirectories(
+          usage,
+          this.#maxScratchBytes,
+          this.#missingDirectoryCount(target.area, this.#parts(target)),
+        );
+      }
       this.#withDirectory(target, true, () => undefined);
+      if (target.area === "scratch") this.assertScratchWithinLimit();
     });
   }
 
@@ -454,6 +434,28 @@ export class WorkspaceSandbox {
   #parts(target: ResolvedSandboxPath): string[] {
     const base = target.area === "scratch" ? this.#scratch : this.#root;
     return relative(base, target.absolute).split(sep).filter(Boolean);
+  }
+
+  #missingDirectoryCount(area: ResolvedSandboxPath["area"], parts: readonly string[]): number {
+    let currentFd = this.#baseFd(area);
+    let ownsCurrent = false;
+    try {
+      for (let index = 0; index < parts.length; index += 1) {
+        let nextFd: number;
+        try {
+          nextFd = openSync(this.#descriptorPath(currentFd, parts[index]), DIRECTORY_OPEN_FLAGS);
+        } catch (error) {
+          if (isFileSystemError(error, "ENOENT")) return parts.length - index;
+          throw error;
+        }
+        if (ownsCurrent) closeSync(currentFd);
+        currentFd = nextFd;
+        ownsCurrent = true;
+      }
+      return 0;
+    } finally {
+      if (ownsCurrent) closeSync(currentFd);
+    }
   }
 
   #withParent<T>(
