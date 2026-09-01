@@ -169,7 +169,9 @@ Nested commands run in separate restricted workers. They have:
 - no network sockets;
 - no access to the user's real home or credentials;
 - CPU, memory, file-size, open-file, process, output, and lifetime limits;
-- process-group cleanup after cancellation or session shutdown.
+- at most eight active command workers per harness by default;
+- a 30-minute wall-clock limit for each command by default;
+- process-group cleanup with `SIGKILL` escalation two seconds after cancellation or session shutdown.
 
 The file tools map `/tmp` to private session scratch space. Sandboxed commands receive the same directory through `TMPDIR`.
 

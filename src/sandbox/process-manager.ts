@@ -16,6 +16,10 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
 const MAX_MAX_OUTPUT_TOKENS = 100_000;
 const MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const MAX_INPUT_BYTES = 1024 * 1024;
+const DEFAULT_WALL_TIME_LIMIT_MS = 30 * 60 * 1_000;
+const MAX_WALL_TIME_LIMIT_MS = 24 * 60 * 60 * 1_000;
+const DEFAULT_MAX_ACTIVE_PROCESSES = 8;
+const MAX_ACTIVE_PROCESSES = 64;
 
 export type ExecCommandInput = {
   cmd: string;
@@ -52,6 +56,8 @@ type ManagedProcess = {
   cursor: number;
   exitCode?: number;
   closed: boolean;
+  lifetimeTimer?: NodeJS.Timeout;
+  terminationTimer?: NodeJS.Timeout;
 };
 
 export type SandboxedProcessManagerOptions = {
@@ -61,6 +67,8 @@ export type SandboxedProcessManagerOptions = {
   fileSizeLimitBytes?: number;
   openFileLimit?: number;
   processLimit?: number;
+  wallTimeLimitMs?: number;
+  maxActiveProcesses?: number;
 };
 
 function boundedInteger(
@@ -143,6 +151,20 @@ export class SandboxedProcessManager {
       fileSizeLimitBytes: options.fileSizeLimitBytes ?? 1024 * 1024 * 1024,
       openFileLimit: options.openFileLimit ?? 256,
       processLimit: options.processLimit ?? currentUserProcessLimit(),
+      wallTimeLimitMs: boundedInteger(
+        options.wallTimeLimitMs,
+        DEFAULT_WALL_TIME_LIMIT_MS,
+        MIN_YIELD_MS,
+        MAX_WALL_TIME_LIMIT_MS,
+        "wallTimeLimitMs",
+      ),
+      maxActiveProcesses: boundedInteger(
+        options.maxActiveProcesses,
+        DEFAULT_MAX_ACTIVE_PROCESSES,
+        1,
+        MAX_ACTIVE_PROCESSES,
+        "maxActiveProcesses",
+      ),
     };
   }
 
@@ -268,6 +290,14 @@ export class SandboxedProcessManager {
   }
 
   #spawn(command: string, cwd: string, tty: boolean): ManagedProcess {
+    const activeProcesses = [...this.#processes.values()].filter(
+      (process) => !process.closed,
+    ).length;
+    if (activeProcesses >= this.#options.maxActiveProcesses) {
+      throw new Error(
+        `command sandbox allows at most ${String(this.#options.maxActiveProcesses)} active processes`,
+      );
+    }
     const id = this.#nextId++;
     const configPath = join(this.#workspace.scratch, `.command-${randomUUID()}.json`);
     writeFileSync(
@@ -303,6 +333,9 @@ export class SandboxedProcessManager {
       closed: false,
     };
     this.#processes.set(id, managed);
+    managed.lifetimeTimer = setTimeout(() => {
+      this.#terminate(managed);
+    }, this.#options.wallTimeLimitMs);
     const append = (chunk: Buffer): void => {
       this.#append(managed, chunk);
     };
@@ -314,6 +347,7 @@ export class SandboxedProcessManager {
     child.once("close", (code, signal) => {
       managed.closed = true;
       managed.exitCode = code ?? (signal === null ? 1 : 128);
+      if (managed.lifetimeTimer !== undefined) clearTimeout(managed.lifetimeTimer);
       rmSync(configPath, { force: true });
     });
     return managed;
@@ -361,18 +395,23 @@ export class SandboxedProcessManager {
   }
 
   #terminate(process: ManagedProcess): void {
-    if (process.closed) return;
+    if (process.closed || process.terminationTimer !== undefined) return;
     const pid = process.child.pid;
-    if (pid !== undefined) {
+    if (pid === undefined) {
+      process.child.kill("SIGTERM");
+    } else {
       try {
         globalThis.process.kill(-pid, "SIGTERM");
       } catch {
         process.child.kill("SIGTERM");
       }
     }
-    const escalation = setTimeout(() => {
-      if (process.closed) return;
-      if (pid !== undefined) {
+    // Keep this timer referenced and kill the group even if its original leader exits first.
+    // Descendants can otherwise survive after inheriting or closing the leader's pipes.
+    process.terminationTimer = setTimeout(() => {
+      if (pid === undefined) {
+        process.child.kill("SIGKILL");
+      } else {
         try {
           globalThis.process.kill(-pid, "SIGKILL");
         } catch {
@@ -380,7 +419,6 @@ export class SandboxedProcessManager {
         }
       }
     }, 2_000);
-    escalation.unref();
   }
 
   #assertOpen(): void {

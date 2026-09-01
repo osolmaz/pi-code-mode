@@ -231,6 +231,62 @@ PY`,
     expect(finished.exit_code).toBe(0);
   });
 
+  it("limits active commands and stops commands at their wall-clock deadline", async () => {
+    const limited = new SandboxedProcessManager(workspace, {
+      maxActiveProcesses: 1,
+      wallTimeLimitMs: 750,
+    });
+    try {
+      const running = await limited.exec({ cmd: "sleep 10", yield_time_ms: 250 });
+      expect(running.session_id).toBeTypeOf("number");
+      await expect(limited.exec({ cmd: "sleep 10", yield_time_ms: 250 })).rejects.toThrow(
+        "at most 1 active processes",
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const finished = await limited.write({
+        session_id: running.session_id,
+        chars: "",
+        yield_time_ms: 2_000,
+      });
+      expect(finished.exit_code).toBeTypeOf("number");
+    } finally {
+      limited.close();
+    }
+  });
+
+  it("escalates shutdown to kill a command tree that ignores SIGTERM", async () => {
+    const guarded = new SandboxedProcessManager(workspace, { wallTimeLimitMs: 10_000 });
+    let commandPid;
+    const isAlive = () => {
+      if (commandPid === undefined) return false;
+      try {
+        process.kill(commandPid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      const running = await guarded.exec({
+        cmd: `trap '' TERM
+printf '%s\\n' "$$"
+while :; do sleep 1; done`,
+        yield_time_ms: 250,
+      });
+      commandPid = Number(running.output.trim());
+      expect(commandPid).toBeGreaterThan(1);
+      expect(isAlive()).toBe(true);
+
+      guarded.close();
+      await new Promise((resolve) => setTimeout(resolve, 2_300));
+      expect(isAlive()).toBe(false);
+    } finally {
+      guarded.close();
+      if (isAlive()) process.kill(commandPid, "SIGKILL");
+    }
+  });
+
   it("validates command and process-session inputs", async () => {
     writeFileSync(join(root, "file.txt"), "file");
     await expect(processes.exec({ cmd: "" })).rejects.toThrow("non-empty");
