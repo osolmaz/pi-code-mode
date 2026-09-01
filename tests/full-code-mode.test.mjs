@@ -184,6 +184,18 @@ PY`,
     expect(readFileSync(join(root, "command.txt"), "utf8")).toBe("written");
   });
 
+  it("uses the private scratch directory as a command workdir", async () => {
+    const result = await processes.exec({
+      cmd: "pwd; printf scratch > command-scratch.txt",
+      workdir: "/tmp",
+      yield_time_ms: 2_000,
+    });
+
+    expect(result.exit_code).toBe(0);
+    expect(result.output.trim()).toBe(workspace.scratch);
+    expect(workspace.readFile("/tmp/command-scratch.txt").toString()).toBe("scratch");
+  });
+
   it("yields a process, writes standard input, and returns only new output", async () => {
     const initial = await processes.exec({
       cmd: 'printf "ready\\n"; read line; printf "got:%s\\n" "$line"',
@@ -313,8 +325,9 @@ while :; do sleep 1; done`,
   });
 
   it("refuses commands while a sensitive workspace path exists", async () => {
-    writeFileSync(join(root, ".env"), "SECRET=value\n");
-    await expect(processes.exec({ cmd: "true" })).rejects.toThrow("sensitive path exists");
+    mkdirSync(join(root, "node_modules", "package"), { recursive: true });
+    writeFileSync(join(root, "node_modules", "package", ".env"), "SECRET=value\n");
+    await expect(processes.exec({ cmd: "true" })).rejects.toThrow("node_modules/package/.env");
   });
 });
 
