@@ -115,17 +115,26 @@ export class WorkspaceSandbox {
       throw new Error("path is invalid or too long");
     }
 
-    const absoluteWorkspaceInput = isAbsolute(input) && isInside(this.#root, resolve(input));
+    const absoluteInput = isAbsolute(input) ? resolve(input) : undefined;
+    const absoluteWorkspaceInput =
+      absoluteInput !== undefined && isInside(this.#root, absoluteInput);
+    const absoluteScratchInput =
+      absoluteInput !== undefined && isInside(this.#scratch, absoluteInput);
     const virtualScratch =
-      !absoluteWorkspaceInput && (input === "/tmp" || input.startsWith("/tmp/"));
-    const area = virtualScratch ? "scratch" : "workspace";
+      !absoluteWorkspaceInput &&
+      !absoluteScratchInput &&
+      (input === "/tmp" || input.startsWith("/tmp/"));
+    const area = absoluteScratchInput || virtualScratch ? "scratch" : "workspace";
     const base = area === "scratch" ? this.#scratch : this.#root;
     const relativeInput = virtualScratch ? input.slice(5) : input;
-    const absolute = virtualScratch
-      ? resolve(base, relativeInput)
-      : isAbsolute(input)
-        ? resolve(input)
-        : resolve(base, input);
+    const absolute =
+      absoluteInput !== undefined && (absoluteWorkspaceInput || absoluteScratchInput)
+        ? absoluteInput
+        : virtualScratch
+          ? resolve(base, relativeInput)
+          : isAbsolute(input)
+            ? resolve(input)
+            : resolve(base, input);
     if (!isInside(base, absolute)) throw new Error("path escapes the Code Mode sandbox");
     if (area === "workspace") assertSafeParts(relative(base, absolute));
 
@@ -214,13 +223,7 @@ export class WorkspaceSandbox {
         } catch {
           continue;
         }
-        const slashRelative = rel.split(sep).join("/");
-        const skippedDirectory =
-          slashRelative === "node_modules" ||
-          slashRelative === ".git/objects" ||
-          slashRelative === "dist" ||
-          slashRelative === "coverage";
-        if (stats.isDirectory() && !stats.isSymbolicLink() && !skippedDirectory) pending.push(path);
+        if (stats.isDirectory() && !stats.isSymbolicLink()) pending.push(path);
       }
     }
   }
