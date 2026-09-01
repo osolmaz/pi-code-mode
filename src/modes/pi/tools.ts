@@ -321,9 +321,11 @@ async function runSandboxedGrep(
   return textResult(truncation.content, Object.keys(details).length === 0 ? undefined : details);
 }
 
-function walkFiles(workspace: WorkspaceSandbox, start: string): string[] {
+type WalkEntry = { path: string; directory: boolean };
+
+function walkEntries(workspace: WorkspaceSandbox, start: string): WalkEntry[] {
   const root = workspace.resolve(start);
-  const files: string[] = [];
+  const entries: WalkEntry[] = [];
   const pending = [root.absolute];
   let visited = 0;
   while (pending.length > 0) {
@@ -335,13 +337,35 @@ function walkFiles(workspace: WorkspaceSandbox, start: string): string[] {
       const path = join(directory, name);
       const stats = workspace.stat(path);
       if (stats.isDirectory()) {
-        if (!new Set(["node_modules", "dist", "coverage"]).has(name)) pending.push(path);
+        if (!new Set(["node_modules", "dist", "coverage"]).has(name)) {
+          entries.push({ path, directory: true });
+          pending.push(path);
+        }
       } else if (stats.isFile()) {
-        files.push(path);
+        entries.push({ path, directory: false });
       }
     }
   }
-  return files;
+  return entries;
+}
+
+function findMatches(
+  workspace: WorkspaceSandbox,
+  path: string,
+  pattern: string,
+  limit: number,
+): string[] {
+  const base = workspace.resolve(path).absolute;
+  return walkEntries(workspace, path)
+    .map((entry) => {
+      const matchPath = relative(base, entry.path).split(sep).join("/");
+      return { matchPath, display: entry.directory ? `${matchPath}/` : matchPath };
+    })
+    .filter(({ matchPath }) =>
+      matchesGlob(pattern.includes("/") ? matchPath : basename(matchPath), pattern),
+    )
+    .slice(0, limit)
+    .map(({ display }) => display);
 }
 
 // Optional built-ins keep separate schemas and result formatting in one selector.
@@ -397,11 +421,7 @@ function optionalTool(
         const path = stringInput(input, "path", ".");
         const pattern = stringInput(input, "pattern");
         const limit = positiveLimit(input["limit"]);
-        const base = workspace.resolve(path).absolute;
-        const matches = walkFiles(workspace, path)
-          .map((file) => relative(base, file).split(sep).join("/"))
-          .filter((file) => matchesGlob(pattern.includes("/") ? file : basename(file), pattern))
-          .slice(0, limit);
+        const matches = findMatches(workspace, path, pattern, limit);
         return Promise.resolve(
           textResult(matches.join("\n"), {
             resultLimitReached: matches.length === limit ? limit : undefined,
