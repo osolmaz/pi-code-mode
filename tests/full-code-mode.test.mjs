@@ -286,6 +286,14 @@ PY`,
     expect(truncated.output).toContain("output truncated");
     expect(truncated.original_token_count).toBeGreaterThan(1);
 
+    const noisy = await processes.exec({
+      cmd: "yes output",
+      max_output_tokens: 100,
+      yield_time_ms: 2_000,
+    });
+    expect(noisy.exit_code).toBeTypeOf("number");
+    expect(noisy.output).toContain("command terminated after exceeding");
+
     const tty = await processes.exec({ cmd: "printf tty", tty: true, yield_time_ms: 2_000 });
     expect(tty.output).toBe("tty");
     expect(tty.exit_code).toBe(0);

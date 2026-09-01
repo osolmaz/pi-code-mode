@@ -12,7 +12,7 @@ const MIN_YIELD_MS = 250;
 const MAX_YIELD_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
 const MAX_MAX_OUTPUT_TOKENS = 100_000;
-const MAX_BUFFER_BYTES = 8 * 1024 * 1024;
+const MAX_TOTAL_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_INPUT_BYTES = 1024 * 1024;
 const DEFAULT_WALL_TIME_LIMIT_MS = 30 * 60 * 1_000;
 const MAX_WALL_TIME_LIMIT_MS = 24 * 60 * 60 * 1_000;
@@ -54,6 +54,7 @@ type ManagedProcess = {
   startedAt: number;
   output: string;
   outputBytes: number;
+  outputLimitExceeded: boolean;
   cursor: number;
   exitCode?: number;
   closed: boolean;
@@ -343,6 +344,7 @@ export class SandboxedProcessManager {
       startedAt: Date.now(),
       output: "",
       outputBytes: 0,
+      outputLimitExceeded: false,
       cursor: 0,
       closed: false,
       outputListeners: new Set(onData === undefined ? [] : [onData]),
@@ -381,17 +383,22 @@ export class SandboxedProcessManager {
   }
 
   #append(process: ManagedProcess, chunk: Buffer): void {
-    for (const listener of process.outputListeners) listener(chunk);
-    const text = chunk.toString("utf8");
-    process.output += text;
-    process.outputBytes += chunk.length;
-    if (Buffer.byteLength(process.output) > MAX_BUFFER_BYTES) {
-      const previousLength = process.output.length;
-      const bytes = Buffer.from(process.output);
-      process.output = bytes.subarray(bytes.length - MAX_BUFFER_BYTES).toString("utf8");
-      const removedCharacters = previousLength - process.output.length;
-      process.cursor = Math.max(0, process.cursor - removedCharacters);
+    const remaining = Math.max(0, MAX_TOTAL_OUTPUT_BYTES - process.outputBytes);
+    const accepted = chunk.subarray(0, remaining);
+    if (accepted.length > 0) {
+      for (const listener of process.outputListeners) listener(accepted);
+      process.output += accepted.toString("utf8");
     }
+    process.outputBytes += chunk.length;
+    if (accepted.length === chunk.length || process.outputLimitExceeded) return;
+
+    process.outputLimitExceeded = true;
+    const notice = Buffer.from(
+      `\n[command terminated after exceeding the ${String(MAX_TOTAL_OUTPUT_BYTES)}-byte output limit]\n`,
+    );
+    for (const listener of process.outputListeners) listener(notice);
+    process.output += notice.toString("utf8");
+    this.#terminate(process);
   }
 
   async #wait(process: ManagedProcess, milliseconds: number): Promise<void> {
