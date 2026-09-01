@@ -72,6 +72,20 @@ describe("writable workspace sandbox", () => {
     chmodSync(root, 0o700);
   });
 
+  it("accounts for automatically created scratch parent directories", async () => {
+    const limited = new WorkspaceSandbox(root, tmpdir(), 16 * 1_024);
+    try {
+      await expect(limited.writeFile("/tmp/a/b/c/d/e/file.txt", "value")).rejects.toThrow(
+        "session scratch exceeds",
+      );
+      expect(limited.exists("/tmp/a")).toBe(false);
+      await expect(limited.mkdir("/tmp/a/b/c/d/e")).rejects.toThrow("session scratch exceeds");
+      expect(limited.exists("/tmp/a")).toBe(false);
+    } finally {
+      limited.close();
+    }
+  });
+
   it("rejects invalid roots, cross-area moves, and operations after close", async () => {
     const fileRoot = join(root, "not-a-directory");
     writeFileSync(fileRoot, "file");
