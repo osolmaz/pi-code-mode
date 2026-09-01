@@ -170,6 +170,8 @@ Nested commands run in separate restricted workers. They have:
 - no access to the user's real home or credentials;
 - CPU, memory, file-size, open-file, process, output, and lifetime limits;
 - at most eight active command workers per harness by default;
+- bounded, expiring records for completed commands that the model does not poll;
+- trusted worker configuration sent through a private pipe rather than command-writable files;
 - a 30-minute wall-clock limit for each command by default;
 - process-group cleanup with `SIGKILL` escalation two seconds after cancellation or session shutdown.
 

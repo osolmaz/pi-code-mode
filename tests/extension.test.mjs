@@ -263,7 +263,10 @@ describe("Pi extension", () => {
     );
     const saved = JSON.parse(readFileSync(configPath, "utf8"));
     expect(saved.mode).toBe("pi");
-    expect(extension.entries.at(-1).data.mode).toBe("pi");
+    expect(extension.entries.at(-1).data).toMatchObject({
+      mode: "pi",
+      piBuiltins: ["read", "bash", "edit", "write"],
+    });
     expect(extension.tools.get("exec").description).toContain("pi mode tools");
     const prompt = await extension.events.get("before_agent_start")(
       { systemPrompt: "base" },
@@ -299,7 +302,11 @@ describe("Pi extension", () => {
     );
     expect(nextEntry).toMatchObject({
       customType: CODE_MODE_SESSION_ENTRY,
-      data: { mode: "pi", contractVersion: 1 },
+      data: {
+        mode: "pi",
+        piBuiltins: ["read", "bash", "edit", "write"],
+        contractVersion: 1,
+      },
     });
   });
 
