@@ -166,6 +166,12 @@ describe("Pi mode built-ins", () => {
       context(),
     );
     expect(text(nestedFind)).toContain("src/two.ts");
+    const directoryFind = await broker.invoke(
+      "pi.find",
+      { path: ".", pattern: "src", limit: 10 },
+      context(),
+    );
+    expect(text(directoryFind)).toContain("src/");
 
     const ls = await broker.invoke("pi.ls", { path: ".", limit: 2 }, context());
     expect(ls.details.entryLimitReached).toBe(2);
