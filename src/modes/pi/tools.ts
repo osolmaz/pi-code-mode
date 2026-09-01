@@ -6,6 +6,7 @@ import {
   createEditTool,
   createReadTool,
   createWriteTool,
+  detectSupportedImageMimeTypeFromFile,
   formatSize,
   truncateHead,
   truncateTail,
@@ -456,6 +457,8 @@ export function createPiTools(
       workspace.access(path);
       return Promise.resolve();
     },
+    detectImageMimeType: (path: string): Promise<string | null> =>
+      workspace.withReadableFile(path, detectSupportedImageMimeTypeFromFile),
   };
   const tools = new Map<string, PiTool>([
     [
