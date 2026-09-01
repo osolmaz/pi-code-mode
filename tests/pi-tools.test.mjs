@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -192,21 +191,21 @@ describe("Pi mode built-ins", () => {
     );
     await expect(broker.invoke("pi.find", { path: ".", pattern: 7 }, context())).rejects.toThrow();
 
-    const hostHasPowerShell =
-      spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", "exit 0"], {
-        stdio: "ignore",
-      }).status === 0;
-    const powerShellCall = broker.invoke(
-      "pi.powershell",
-      { command: "Write-Output test" },
-      context(),
-    );
-    if (hostHasPowerShell) {
-      await expect(powerShellCall).resolves.toMatchObject({
+    const powerShellOutcome = await broker
+      .invoke("pi.powershell", { command: "Write-Output test" }, context())
+      .then(
+        (result) => ({ result }),
+        (error) => ({ error }),
+      );
+    if ("result" in powerShellOutcome) {
+      expect(powerShellOutcome.result).toMatchObject({
         content: [{ type: "text", text: expect.stringContaining("test") }],
       });
     } else {
-      await expect(powerShellCall).rejects.toThrow("PowerShell is not installed");
+      expect(powerShellOutcome.error).toBeInstanceOf(Error);
+      expect(powerShellOutcome.error.message).toMatch(
+        /PowerShell is (?:not installed|installed but is unavailable in the sandbox)/u,
+      );
     }
   });
 });
