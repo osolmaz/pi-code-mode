@@ -109,6 +109,7 @@ function appendCommandStatus(text: string, status: string): string {
 function createSandboxedBashTool(
   workspace: WorkspaceSandbox,
   processes: SandboxedProcessManager,
+  memoryLimitBytes?: number,
 ): PiTool {
   return {
     name: "bash",
@@ -139,6 +140,7 @@ function createSandboxedBashTool(
           },
           ...(signal === undefined ? {} : { signal }),
           ...(input.timeout === undefined ? {} : { timeout: input.timeout }),
+          ...(memoryLimitBytes === undefined ? {} : { memoryLimitBytes }),
         });
       } catch (error) {
         const snapshot = output.snapshot();
@@ -174,7 +176,7 @@ function createSandboxedPowerShellTool(
   workspace: WorkspaceSandbox,
   processes: SandboxedProcessManager,
 ): PiTool {
-  const bash = createSandboxedBashTool(workspace, processes);
+  const bash = createSandboxedBashTool(workspace, processes, 8 * 1024 * 1024 * 1024);
   return {
     ...bash,
     name: "powershell",
