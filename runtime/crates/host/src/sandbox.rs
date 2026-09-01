@@ -74,6 +74,7 @@ pub fn apply_command_sandbox(workspace: &str, scratch: &str) -> anyhow::Result<(
         "/lib64",
         "/etc/alternatives",
         "/etc/ld.so.cache",
+        "/opt/microsoft/powershell",
         "/dev/null",
         "/dev/urandom",
         "/dev/zero",
