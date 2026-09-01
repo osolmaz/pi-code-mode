@@ -1,11 +1,14 @@
 import {
   accessSync,
   chmodSync,
+  closeSync,
   constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -16,7 +19,7 @@ import {
   type Stats,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -47,6 +50,7 @@ const SENSITIVE_NAMES = new Set([
 ]);
 const SENSITIVE_PREFIXES = [".env.", "id_dsa", "id_ed25519", "id_ecdsa", "id_rsa"];
 const MAX_PATH_BYTES = 16 * 1024;
+const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 
 export type ResolvedSandboxPath = {
   absolute: string;
@@ -74,6 +78,10 @@ function assertSafeParts(path: string): void {
   }
 }
 
+function isFileSystemError(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
 function nearestExisting(path: string): string {
   let candidate = path;
   while (!existsSync(candidate)) {
@@ -86,7 +94,9 @@ function nearestExisting(path: string): string {
 
 export class WorkspaceSandbox {
   readonly #root: string;
+  readonly #rootFd: number;
   readonly #scratch: string;
+  readonly #scratchFd: number;
   #closed = false;
   #mutationQueue = Promise.resolve();
   readonly #mutationContext = new AsyncLocalStorage<boolean>();
@@ -94,8 +104,10 @@ export class WorkspaceSandbox {
   constructor(rootDir: string, scratchParent = tmpdir()) {
     this.#root = realpathSync(rootDir);
     if (!statSync(this.#root).isDirectory()) throw new Error("workspace root must be a directory");
+    this.#rootFd = openSync(this.#root, DIRECTORY_OPEN_FLAGS);
     this.#scratch = realpathSync(mkdtempSync(join(scratchParent, "pi-code-mode-")));
     chmodSync(this.#scratch, 0o700);
+    this.#scratchFd = openSync(this.#scratch, DIRECTORY_OPEN_FLAGS);
   }
 
   get root(): string {
@@ -143,11 +155,15 @@ export class WorkspaceSandbox {
     if (!isInside(base, realExisting))
       throw new Error("path resolves outside the Code Mode sandbox");
     if (existsSync(absolute)) {
+      if (lstatSync(absolute).isSymbolicLink()) {
+        throw new Error(
+          options.write === true
+            ? "writes through symbolic links are not allowed"
+            : "symbolic links are not available in Code Mode",
+        );
+      }
       const real = realpathSync(absolute);
       if (!isInside(base, real)) throw new Error("path resolves outside the Code Mode sandbox");
-      if (options.write === true && lstatSync(absolute).isSymbolicLink()) {
-        throw new Error("writes through symbolic links are not allowed");
-      }
     }
     return {
       absolute,
@@ -163,39 +179,66 @@ export class WorkspaceSandbox {
 
   readFile(path: string): Buffer {
     const target = this.resolve(path);
-    if (!statSync(target.absolute).isFile()) throw new Error("path must be a file");
-    return readFileSync(target.absolute);
+    return this.#withParent(target, false, (parentFd, name) => {
+      const fd = openSync(
+        this.#descriptorPath(parentFd, name),
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
+      try {
+        if (!fstatSync(fd).isFile()) throw new Error("path must be a file");
+        return readFileSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+    });
   }
 
   access(path: string, write = false): void {
     const target = this.resolve(path, { write });
-    accessSync(target.absolute, write ? constants.R_OK | constants.W_OK : constants.R_OK);
+    this.#withParent(target, false, (parentFd, name) => {
+      const descriptorPath = this.#descriptorPath(parentFd, name);
+      if (lstatSync(descriptorPath).isSymbolicLink()) {
+        throw new Error("symbolic links are not available in Code Mode");
+      }
+      accessSync(descriptorPath, write ? constants.R_OK | constants.W_OK : constants.R_OK);
+    });
   }
 
   exists(path: string): boolean {
     try {
-      return existsSync(this.resolve(path).absolute);
+      const target = this.resolve(path);
+      return this.#withParent(target, false, (parentFd, name) => {
+        const stats = lstatSync(this.#descriptorPath(parentFd, name));
+        return !stats.isSymbolicLink();
+      });
     } catch {
       return false;
     }
   }
 
   stat(path: string): Stats {
-    return statSync(this.resolve(path).absolute);
+    const target = this.resolve(path);
+    return this.#withParent(target, false, (parentFd, name) => {
+      const stats = lstatSync(this.#descriptorPath(parentFd, name));
+      if (stats.isSymbolicLink()) throw new Error("symbolic links are not available in Code Mode");
+      return stats;
+    });
   }
 
   readdir(path: string): string[] {
     const target = this.resolve(path);
-    return readdirSync(target.absolute)
-      .filter((name) => {
-        try {
-          this.resolve(join(target.absolute, name));
-          return true;
-        } catch {
-          return false;
-        }
-      })
-      .sort((left, right) => left.localeCompare(right));
+    return this.#withDirectory(target, false, (directoryFd) =>
+      readdirSync(this.#descriptorPath(directoryFd))
+        .filter((name) => {
+          try {
+            this.resolve(join(target.absolute, name));
+            return true;
+          } catch {
+            return false;
+          }
+        })
+        .sort((left, right) => left.localeCompare(right)),
+    );
   }
 
   // The command scan fails closed across path, size, type, and traversal checks.
@@ -231,25 +274,35 @@ export class WorkspaceSandbox {
   async writeFile(path: string, content: string | Buffer): Promise<void> {
     await this.mutate(() => {
       const target = this.resolve(path, { write: true });
-      mkdirSync(dirname(target.absolute), { recursive: true, mode: 0o700 });
-      const temporary = join(
-        dirname(target.absolute),
-        `.${basename(target.absolute)}.${randomUUID()}.tmp`,
-      );
-      const mode = existsSync(target.absolute) ? statSync(target.absolute).mode & 0o777 : 0o600;
-      try {
-        writeFileSync(temporary, content, { flag: "wx", mode });
-        renameSync(temporary, target.absolute);
-      } catch (error) {
-        rmSync(temporary, { force: true });
-        throw error;
-      }
+      this.#withParent(target, true, (parentFd, name) => {
+        const targetPath = this.#descriptorPath(parentFd, name);
+        const temporaryName = `.${name}.${randomUUID()}.tmp`;
+        const temporaryPath = this.#descriptorPath(parentFd, temporaryName);
+        let mode = 0o600;
+        try {
+          const stats = lstatSync(targetPath);
+          if (stats.isSymbolicLink()) {
+            throw new Error("symbolic links are not available in Code Mode");
+          }
+          mode = stats.mode & 0o777;
+        } catch (error) {
+          if (!isFileSystemError(error, "ENOENT")) throw error;
+        }
+        try {
+          writeFileSync(temporaryPath, content, { flag: "wx", mode });
+          renameSync(temporaryPath, targetPath);
+        } catch (error) {
+          rmSync(temporaryPath, { force: true });
+          throw error;
+        }
+      });
     });
   }
 
   async mkdir(path: string): Promise<void> {
     await this.mutate(() => {
-      mkdirSync(this.resolve(path, { write: true }).absolute, { recursive: true, mode: 0o700 });
+      const target = this.resolve(path, { write: true });
+      this.#withDirectory(target, true, () => undefined);
     });
   }
 
@@ -259,7 +312,9 @@ export class WorkspaceSandbox {
       if (target.absolute === this.#root || target.absolute === this.#scratch) {
         throw new Error("cannot remove a sandbox root");
       }
-      rmSync(target.absolute, { recursive, force: false });
+      this.#withParent(target, false, (parentFd, name) => {
+        rmSync(this.#descriptorPath(parentFd, name), { recursive, force: false });
+      });
     });
   }
 
@@ -268,8 +323,14 @@ export class WorkspaceSandbox {
       const source = this.resolve(from, { write: true });
       const target = this.resolve(to, { write: true });
       if (source.area !== target.area) throw new Error("moves cannot cross sandbox areas");
-      mkdirSync(dirname(target.absolute), { recursive: true, mode: 0o700 });
-      renameSync(source.absolute, target.absolute);
+      this.#withParent(source, false, (sourceParentFd, sourceName) => {
+        this.#withParent(target, true, (targetParentFd, targetName) => {
+          renameSync(
+            this.#descriptorPath(sourceParentFd, sourceName),
+            this.#descriptorPath(targetParentFd, targetName),
+          );
+        });
+      });
     });
   }
 
@@ -287,7 +348,72 @@ export class WorkspaceSandbox {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    closeSync(this.#rootFd);
+    closeSync(this.#scratchFd);
     rmSync(this.#scratch, { recursive: true, force: true });
+  }
+
+  #descriptorPath(fd: number, name?: string): string {
+    const base = `/proc/self/fd/${String(fd)}`;
+    return name === undefined ? base : `${base}/${name}`;
+  }
+
+  #baseFd(area: ResolvedSandboxPath["area"]): number {
+    return area === "scratch" ? this.#scratchFd : this.#rootFd;
+  }
+
+  #parts(target: ResolvedSandboxPath): string[] {
+    const base = target.area === "scratch" ? this.#scratch : this.#root;
+    return relative(base, target.absolute).split(sep).filter(Boolean);
+  }
+
+  #withParent<T>(
+    target: ResolvedSandboxPath,
+    createParents: boolean,
+    operation: (parentFd: number, name: string) => T,
+  ): T {
+    const parts = this.#parts(target);
+    const name = parts.pop() ?? ".";
+    return this.#walkDirectories(target.area, parts, createParents, (parentFd) =>
+      operation(parentFd, name),
+    );
+  }
+
+  #withDirectory<T>(
+    target: ResolvedSandboxPath,
+    create: boolean,
+    operation: (directoryFd: number) => T,
+  ): T {
+    return this.#walkDirectories(target.area, this.#parts(target), create, operation);
+  }
+
+  #walkDirectories<T>(
+    area: ResolvedSandboxPath["area"],
+    parts: readonly string[],
+    create: boolean,
+    operation: (directoryFd: number) => T,
+  ): T {
+    let currentFd = this.#baseFd(area);
+    let ownsCurrent = false;
+    try {
+      for (const part of parts) {
+        const path = this.#descriptorPath(currentFd, part);
+        if (create) {
+          try {
+            mkdirSync(path, { mode: 0o700 });
+          } catch (error) {
+            if (!isFileSystemError(error, "EEXIST")) throw error;
+          }
+        }
+        const nextFd = openSync(path, DIRECTORY_OPEN_FLAGS);
+        if (ownsCurrent) closeSync(currentFd);
+        currentFd = nextFd;
+        ownsCurrent = true;
+      }
+      return operation(currentFd);
+    } finally {
+      if (ownsCurrent) closeSync(currentFd);
+    }
   }
 
   #assertOpen(): void {
