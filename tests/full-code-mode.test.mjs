@@ -237,6 +237,17 @@ PY`,
     expect(workspace.exists("detached.txt")).toBe(false);
   });
 
+  it("kills redirected background descendants before reporting completion", async () => {
+    const result = await processes.exec({
+      cmd: "(sleep 0.4; printf escaped > delayed.txt) </dev/null >/dev/null 2>&1 &",
+      yield_time_ms: 2_000,
+    });
+
+    expect(result.exit_code).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(existsSync(join(root, "delayed.txt"))).toBe(false);
+  });
+
   it("uses the private scratch directory as a command workdir", async () => {
     const result = await processes.exec({
       cmd: "pwd; printf scratch > command-scratch.txt",
@@ -277,6 +288,7 @@ PY`,
 
     const tty = await processes.exec({ cmd: "printf tty", tty: true, yield_time_ms: 2_000 });
     expect(tty.output).toBe("tty");
+    expect(tty.exit_code).toBe(0);
 
     const controller = new AbortController();
     controller.abort();

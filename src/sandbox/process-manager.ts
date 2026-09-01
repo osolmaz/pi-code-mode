@@ -360,9 +360,14 @@ export class SandboxedProcessManager {
       this.#append(managed, Buffer.from(`command worker failed: ${error.message}\n`));
     });
     child.once("close", (code, signal) => {
+      // A background descendant can close every inherited pipe and outlive the worker. Session
+      // creation and process-group changes are denied, so one final group kill removes it before
+      // this command is reported as complete.
+      this.#signalGroup(managed, "SIGKILL");
       managed.closed = true;
       managed.exitCode = code ?? (signal === null ? 1 : 128);
       if (managed.lifetimeTimer !== undefined) clearTimeout(managed.lifetimeTimer);
+      if (managed.terminationTimer !== undefined) clearTimeout(managed.terminationTimer);
       managed.outputListeners.clear();
       this.#retainCompleted(managed);
     });
@@ -448,30 +453,26 @@ export class SandboxedProcessManager {
     this.#processes.delete(id);
   }
 
-  #terminate(process: ManagedProcess): void {
-    if (process.closed || process.terminationTimer !== undefined) return;
+  #signalGroup(process: ManagedProcess, signal: NodeJS.Signals): void {
     const pid = process.child.pid;
     if (pid === undefined) {
-      process.child.kill("SIGTERM");
-    } else {
-      try {
-        globalThis.process.kill(-pid, "SIGTERM");
-      } catch {
-        process.child.kill("SIGTERM");
-      }
+      process.child.kill(signal);
+      return;
     }
+    try {
+      globalThis.process.kill(-pid, signal);
+    } catch {
+      if (!process.closed) process.child.kill(signal);
+    }
+  }
+
+  #terminate(process: ManagedProcess): void {
+    if (process.closed || process.terminationTimer !== undefined) return;
+    this.#signalGroup(process, "SIGTERM");
     // Keep this timer referenced and kill the group even if its original leader exits first.
     // Descendants can otherwise survive after inheriting or closing the leader's pipes.
     process.terminationTimer = setTimeout(() => {
-      if (pid === undefined) {
-        process.child.kill("SIGKILL");
-      } else {
-        try {
-          globalThis.process.kill(-pid, "SIGKILL");
-        } catch {
-          process.child.kill("SIGKILL");
-        }
-      }
+      this.#signalGroup(process, "SIGKILL");
     }, 2_000);
   }
 
