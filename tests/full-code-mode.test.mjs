@@ -410,6 +410,14 @@ while :; do sleep 1; done`,
     writeFileSync(join(root, "node_modules", "package", ".env"), "SECRET=value\n");
     await expect(processes.exec({ cmd: "true" })).rejects.toThrow("node_modules/package/.env");
   });
+
+  it("blocks certificate and private-key file suffixes", async () => {
+    mkdirSync(join(root, "certificates"));
+    writeFileSync(join(root, "certificates", "deploy.PEM"), "credential\n");
+
+    expect(() => workspace.readFile("certificates/deploy.PEM")).toThrow("sensitive path");
+    await expect(processes.exec({ cmd: "true" })).rejects.toThrow("certificates/deploy.PEM");
+  });
 });
 
 describe("nested SDK paths", () => {

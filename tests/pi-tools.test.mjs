@@ -83,6 +83,25 @@ describe("Pi mode built-ins", () => {
     expect(text(large)).toContain("Earlier output was discarded inside the session sandbox");
   });
 
+  it("returns supported images through the Pi read contract", async () => {
+    writeFileSync(
+      join(root, "pixel.png"),
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+3MxZ5wAAAABJRU5ErkJggg==",
+        "base64",
+      ),
+    );
+    const broker = new CodeModeBroker(root, createPiTools(["read"], workspace, processes), {
+      mode: "pi",
+    });
+
+    const result = await broker.invoke("pi.read", { path: "pixel.png" }, context());
+    expect(text(result)).toContain("Read image file [image/png]");
+    expect(result.content).toContainEqual(
+      expect.objectContaining({ type: "image", mimeType: "image/png" }),
+    );
+  });
+
   it("runs optional grep, find, and ls and reports unavailable PowerShell", async () => {
     mkdirSync(join(root, "src"));
     mkdirSync(join(root, "node_modules"));

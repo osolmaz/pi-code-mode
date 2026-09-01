@@ -51,6 +51,7 @@ const SENSITIVE_NAMES = new Set([
   "tokens.json",
 ]);
 const SENSITIVE_PREFIXES = [".env.", "id_dsa", "id_ed25519", "id_ecdsa", "id_rsa"];
+const SENSITIVE_SUFFIXES = [".key", ".p12", ".pem", ".pfx"];
 const MAX_PATH_BYTES = 16 * 1024;
 const DEFAULT_MAX_READ_BYTES = 16 * 1024 * 1024;
 const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
@@ -74,7 +75,8 @@ function assertSafeParts(path: string): void {
       SENSITIVE_NAMES.has(normalized) ||
       SENSITIVE_PREFIXES.some(
         (prefix) => normalized === prefix || normalized.startsWith(`${prefix}.`),
-      )
+      ) ||
+      SENSITIVE_SUFFIXES.some((suffix) => normalized.endsWith(suffix))
     ) {
       throw new Error(`sensitive path is not available in Code Mode: ${part}`);
     }
@@ -201,6 +203,22 @@ export class WorkspaceSandbox {
         closeSync(fd);
       }
     });
+  }
+
+  async withReadableFile<T>(
+    path: string,
+    operation: (descriptorPath: string) => Promise<T>,
+  ): Promise<T> {
+    const target = this.resolve(path);
+    const fd = this.#withParent(target, false, (parentFd, name) =>
+      openSync(this.#descriptorPath(parentFd, name), constants.O_RDONLY | constants.O_NOFOLLOW),
+    );
+    try {
+      if (!fstatSync(fd).isFile()) throw new Error("path must be a file");
+      return await operation(this.#descriptorPath(fd));
+    } finally {
+      closeSync(fd);
+    }
   }
 
   access(path: string, write = false): void {
