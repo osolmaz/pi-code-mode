@@ -50,8 +50,9 @@ describe("host protocol", () => {
     expect(
       wireTools([
         {
-          name: "full",
-          codeModeName: "full",
+          id: "full",
+          sdkPath: ["group", "full"],
+          modes: ["codex"],
           description: "full tool",
           usage: "await tools.full({})",
           kind: "function",
@@ -63,8 +64,9 @@ describe("host protocol", () => {
           invoke: async () => null,
         },
         {
-          name: "minimal",
-          codeModeName: "minimal",
+          id: "minimal",
+          sdkPath: ["minimal"],
+          modes: ["codex"],
           description: "minimal tool",
           kind: "function",
           effect: "read",
@@ -74,8 +76,8 @@ describe("host protocol", () => {
       ]),
     ).toEqual([
       {
-        name: "full",
-        codeModeName: "full",
+        id: "full",
+        sdkPath: ["group", "full"],
         description: "full tool",
         usage: "await tools.full({})",
         kind: "function",
@@ -84,8 +86,8 @@ describe("host protocol", () => {
         deferred: true,
       },
       {
-        name: "minimal",
-        codeModeName: "minimal",
+        id: "minimal",
+        sdkPath: ["minimal"],
         description: "minimal tool",
         kind: "function",
         deferred: false,

@@ -22,7 +22,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
-import { CODE_MODE_SYSTEM_PROMPT } from "../core/prompt.js";
+import type { CodeModeMode } from "../core/mode.js";
 import type { CodeModeLimits } from "../core/types.js";
 import { createCodeModeExtension, createManagedCodeModeExtension } from "../extension/index.js";
 import type { CodeModeExtensionOptions } from "../extension/index.js";
@@ -30,10 +30,12 @@ import type { HostProcessOptions } from "../host/process.js";
 import { getCodeModeConfigPath } from "./config.js";
 
 function extensionOptions(options: {
+  mode?: CodeModeMode;
   limits?: Partial<CodeModeLimits>;
   hostProcess?: HostProcessOptions;
 }): CodeModeExtensionOptions {
   return {
+    ...(options.mode === undefined ? {} : { mode: options.mode }),
     ...(options.limits === undefined ? {} : { limits: options.limits }),
     ...(options.hostProcess === undefined ? {} : { hostProcess: options.hostProcess }),
   };
@@ -44,6 +46,7 @@ export type CreateCodeModeHarnessOptions = {
   model: string;
   cwd: string;
   apiKey?: string;
+  mode?: CodeModeMode;
   limits?: Partial<CodeModeLimits>;
   hostProcess?: HostProcessOptions;
 };
@@ -56,7 +59,7 @@ export type CodeModeHarness = {
 
 export type CreateCodeModeResourceLoaderOptions = Pick<
   CreateCodeModeHarnessOptions,
-  "cwd" | "hostProcess" | "limits"
+  "cwd" | "hostProcess" | "limits" | "mode"
 > & {
   agentDir?: string;
 };
@@ -74,7 +77,6 @@ async function loadCodeModeResources(
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
-    systemPrompt: CODE_MODE_SYSTEM_PROMPT,
     extensionFactories: [extension],
     skillsOverride: () => ({ skills: [], diagnostics: [] }),
     promptsOverride: () => ({ prompts: [], diagnostics: [] }),
@@ -99,6 +101,8 @@ async function createModelRuntime(provider: string, apiKey?: string): Promise<Mo
   return modelRuntime;
 }
 
+// The Factory harness preserves optional provider, host, and limit settings independently.
+// eslint-disable-next-line complexity
 export async function createCodeModeHarness(
   options: CreateCodeModeHarnessOptions,
 ): Promise<CodeModeHarness> {
@@ -118,6 +122,7 @@ export async function createCodeModeHarness(
     {
       cwd: options.cwd,
       agentDir,
+      ...(options.mode === undefined ? {} : { mode: options.mode }),
       ...(options.limits === undefined ? {} : { limits: options.limits }),
       ...(options.hostProcess === undefined ? {} : { hostProcess: options.hostProcess }),
     },
@@ -134,7 +139,6 @@ export async function createCodeModeHarness(
     thinkingLevel: resolved.thinkingLevel ?? "off",
     modelRuntime,
     resourceLoader,
-    tools: ["exec", "wait"],
     sessionManager: SessionManager.inMemory(options.cwd),
     settingsManager,
   });
@@ -185,6 +189,7 @@ export type CreateCodeModeRuntimeOptions = {
   cwd: string;
   agentDir?: string;
   apiKey?: string;
+  mode?: CodeModeMode;
   limits?: Partial<CodeModeLimits>;
   hostProcess?: HostProcessOptions;
 };
@@ -215,7 +220,6 @@ export async function createCodeModeRuntime(
         noSkills: true,
         noPromptTemplates: true,
         noContextFiles: true,
-        systemPrompt: CODE_MODE_SYSTEM_PROMPT,
         extensionFactories: [extension],
       },
     });
@@ -246,7 +250,6 @@ export async function createCodeModeRuntime(
         ...(sessionStartEvent === undefined ? {} : { sessionStartEvent }),
         model: resolved.model,
         thinkingLevel: resolved.thinkingLevel ?? "off",
-        tools: ["exec", "wait"],
       })),
       services,
       diagnostics,

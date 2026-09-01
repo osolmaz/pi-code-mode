@@ -2,7 +2,8 @@ use anyhow::{Context, bail};
 
 #[cfg(target_os = "linux")]
 use landlock::{
-    ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetStatus,
+    ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr,
+    RulesetCreatedAttr, RulesetStatus, path_beneath_rules,
 };
 #[cfg(target_os = "linux")]
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
@@ -28,17 +29,7 @@ pub fn apply_landlock() -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn apply_seccomp() -> anyhow::Result<()> {
-    let denied = [
-        libc::SYS_socket,
-        libc::SYS_socketpair,
-        libc::SYS_execve,
-        libc::SYS_execveat,
-        libc::SYS_ptrace,
-        libc::SYS_bpf,
-        libc::SYS_userfaultfd,
-        libc::SYS_io_uring_setup,
-    ];
+fn apply_seccomp_denials(denied: impl IntoIterator<Item = i64>) -> anyhow::Result<()> {
     let rules = denied
         .into_iter()
         .map(|syscall| (syscall, vec![]))
@@ -57,6 +48,79 @@ pub fn apply_seccomp() -> anyhow::Result<()> {
         .try_into()
         .context("failed to compile the seccomp filter")?;
     seccompiler::apply_filter_all_threads(&program).context("failed to apply the seccomp filter")
+}
+
+#[cfg(target_os = "linux")]
+pub fn apply_seccomp() -> anyhow::Result<()> {
+    apply_seccomp_denials([
+        libc::SYS_socket,
+        libc::SYS_socketpair,
+        libc::SYS_execve,
+        libc::SYS_execveat,
+        libc::SYS_ptrace,
+        libc::SYS_bpf,
+        libc::SYS_userfaultfd,
+        libc::SYS_io_uring_setup,
+    ])
+}
+
+#[cfg(target_os = "linux")]
+pub fn apply_command_sandbox(workspace: &str, scratch: &str) -> anyhow::Result<()> {
+    let abi = ABI::V4;
+    let read_paths = [
+        "/bin",
+        "/usr",
+        "/lib",
+        "/lib64",
+        "/etc/alternatives",
+        "/etc/ld.so.cache",
+        "/dev/null",
+        "/dev/urandom",
+        "/dev/zero",
+    ]
+    .into_iter()
+    .filter(|path| std::path::Path::new(path).exists());
+    let write_paths = [
+        workspace,
+        scratch,
+        "/dev/null",
+        "/dev/ptmx",
+        "/dev/pts",
+        "/dev/tty",
+    ]
+    .into_iter()
+    .filter(|path| std::path::Path::new(path).exists());
+    let status = Ruleset::default()
+        .handle_access(AccessFs::from_all(abi))
+        .context("failed to select command filesystem rights")?
+        .handle_access(AccessNet::from_all(abi))
+        .context("failed to select command network rights")?
+        .create()
+        .context("failed to create the command ruleset")?
+        .add_rules(path_beneath_rules(read_paths, AccessFs::from_read(abi)))
+        .context("failed to add command read rules")?
+        .add_rules(path_beneath_rules(write_paths, AccessFs::from_all(abi)))
+        .context("failed to add command write rules")?
+        .set_compatibility(CompatLevel::HardRequirement)
+        .restrict_self()
+        .context("failed to apply the command Landlock ruleset")?;
+    if status.ruleset != RulesetStatus::FullyEnforced || !status.no_new_privs {
+        bail!("the command Landlock sandbox was not fully enforced: {status:?}");
+    }
+    apply_seccomp_denials([
+        libc::SYS_socket,
+        libc::SYS_socketpair,
+        libc::SYS_ptrace,
+        libc::SYS_bpf,
+        libc::SYS_userfaultfd,
+        libc::SYS_io_uring_setup,
+        libc::SYS_mount,
+        libc::SYS_umount2,
+        libc::SYS_pivot_root,
+        libc::SYS_chroot,
+        libc::SYS_setns,
+        libc::SYS_unshare,
+    ])
 }
 
 #[cfg(not(target_os = "linux"))]

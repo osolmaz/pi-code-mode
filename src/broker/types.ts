@@ -1,7 +1,10 @@
+import type { CodeModeMode } from "../core/mode.js";
+
 export type ToolEffect = "read" | "write" | "execute" | "network" | "interactive";
 export type ToolReplay = "safe" | "unsafe";
 
 export type CodeModeInvocationContext = {
+  mode: CodeModeMode;
   sessionId: string;
   cellId: string;
   parentToolCallId: string;
@@ -10,8 +13,9 @@ export type CodeModeInvocationContext = {
 };
 
 export type CodeModeToolDescriptor = {
-  name: string;
-  codeModeName: string;
+  id: string;
+  sdkPath: readonly string[];
+  modes: readonly CodeModeMode[];
   description: string;
   usage?: string;
   kind: "function" | "freeform";
@@ -20,10 +24,11 @@ export type CodeModeToolDescriptor = {
   deferred?: boolean;
   effect: ToolEffect;
   replay: ToolReplay;
-  directOnly?: boolean;
   invoke: (
     input: unknown,
     context: CodeModeInvocationContext,
     signal: AbortSignal,
   ) => Promise<unknown>;
 };
+
+export type CodeModeToolRegistration = CodeModeToolDescriptor;

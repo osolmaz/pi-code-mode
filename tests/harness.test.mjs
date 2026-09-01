@@ -4,11 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import {
-  CODE_MODE_SYSTEM_PROMPT,
-  createCodeModeResourceLoader,
-  createCodeModeRuntime,
-} from "../src/index.ts";
+import { createCodeModeResourceLoader, createCodeModeRuntime } from "../src/index.ts";
 
 let agentDir;
 let root;
@@ -24,7 +20,7 @@ afterEach(() => {
 });
 
 describe("standard Pi runtime", () => {
-  it("uses the Code Mode agent directory and exposes only exec and wait", async () => {
+  it("uses the Code Mode agent directory and preserves Pi defaults for the startup snapshot", async () => {
     const runtime = await createCodeModeRuntime({
       provider: "openai",
       model: "gpt-5.4",
@@ -42,8 +38,15 @@ describe("standard Pi runtime", () => {
         diagnostics: [],
       });
       expect(runtime.services.resourceLoader.getAgentsFiles()).toEqual({ agentsFiles: [] });
-      expect(runtime.services.resourceLoader.getSystemPrompt()).toBe(CODE_MODE_SYSTEM_PROMPT);
-      expect(runtime.session.agent.state.tools.map((tool) => tool.name)).toEqual(["exec", "wait"]);
+      expect(runtime.services.resourceLoader.getSystemPrompt()).toBeUndefined();
+      expect(runtime.session.agent.state.tools.map((tool) => tool.name)).toEqual([
+        "read",
+        "bash",
+        "edit",
+        "write",
+        "exec",
+        "wait",
+      ]);
     } finally {
       await runtime.dispose();
     }
@@ -51,7 +54,7 @@ describe("standard Pi runtime", () => {
 });
 
 describe("SDK harness resource loader", () => {
-  it("loads only the inline Code Mode extension and fixed prompt", async () => {
+  it("loads only the inline Code Mode extension and leaves mode prompts to the extension", async () => {
     const loader = await createCodeModeResourceLoader({
       cwd: root,
       agentDir,
@@ -64,7 +67,7 @@ describe("SDK harness resource loader", () => {
     expect(loader.getPrompts()).toEqual({ prompts: [], diagnostics: [] });
     expect(loader.getThemes()).toEqual({ themes: [], diagnostics: [] });
     expect(loader.getAgentsFiles()).toEqual({ agentsFiles: [] });
-    expect(loader.getSystemPrompt()).toBe(CODE_MODE_SYSTEM_PROMPT);
+    expect(loader.getSystemPrompt()).toBeUndefined();
     expect(loader.getAppendSystemPrompt()).toEqual([]);
   });
 });

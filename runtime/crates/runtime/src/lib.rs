@@ -98,11 +98,11 @@ impl RuntimeExecution {
         let allowed_tools = config
             .tools
             .iter()
-            .map(|tool| tool.name.clone())
+            .map(|tool| tool.id.clone())
             .collect::<HashSet<_>>();
         if allowed_tools.len() != config.tools.len() {
             return Err(RuntimeError::Initialization(
-                "tool names must be unique".to_owned(),
+                "tool ids must be unique".to_owned(),
             ));
         }
         runtime.op_state().borrow_mut().put(RuntimeState {

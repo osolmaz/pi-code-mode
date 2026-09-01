@@ -22,7 +22,8 @@ pub struct RuntimeLimits {
 
 #[derive(Clone, Debug)]
 pub struct RuntimeTool {
-    pub name: String,
+    pub id: String,
+    pub sdk_path: Vec<String>,
     pub description: String,
     pub deferred: bool,
 }

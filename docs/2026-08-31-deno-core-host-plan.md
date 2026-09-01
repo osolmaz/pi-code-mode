@@ -2,6 +2,7 @@
 title: Build a Deno Core Code Mode host
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-08-31
+updated: 2026-09-01
 ---
 
 # Plan: Deno Core host for Pi Code Mode
@@ -10,26 +11,35 @@ date: 2026-08-31
 
 ## Objective
 
-Replace the current QuickJS implementation in `pi-code-mode` with a production Code Mode host built on Rust, `deno_core`, and V8.
+Complete the production Code Mode host built on Rust, `deno_core`, and V8, then replace the current read-only capability contract in place.
+
+The V8 host and OpenAI-shaped `exec` and `wait` surface are already implemented. The remaining cutover adds the full coding capability layer without giving the V8 process ambient host authority.
 
 The final system will:
 
-- keep Pi’s normal interactive window;
-- expose only OpenAI-shaped `exec` and `wait` tools to the model;
-- send raw JavaScript through OpenAI freeform grammar tools when the selected provider advertises that capability;
-- avoid production checks for specific model names, including GPT-5.6 aliases;
-- accept arbitrary JavaScript within a strict capability boundary;
-- let JavaScript compose parent-owned tools through `tools`;
+- keep Pi's normal interactive window;
+- expose only OpenAI-shaped `exec` and `wait` tools to the provider;
+- send raw JavaScript through freeform grammar tools when the selected provider advertises that capability;
+- activate through provider capabilities without checking model names;
+- accept arbitrary bounded JavaScript within a strict capability boundary;
+- let each session select `codex` or `pi` mode;
+- provide exact Codex-compatible coding tools inside `tools` in Codex mode;
+- mirror vanilla Pi's active built-in coding tools inside `tools` in Pi mode;
+- never expose both built-in tool sets in one session;
+- accept explicit project and third-party tool registrations for one or both modes;
+- route equivalent work in both modes through one workspace and process sandbox;
 - support sequential, conditional, parallel, and repeated tool calls;
 - keep intermediate tool results inside V8;
 - support yielded cells and later observation through `wait`;
-- apply permissions and approvals to each nested operation;
-- keep credentials and host APIs outside the JavaScript runtime;
+- allow workspace writes, patches, commands, and long-running process control;
+- provide private session scratch as `/tmp` to file tools and through `TMPDIR` to commands;
+- keep credentials and host APIs outside JavaScript and nested command environments;
+- show every nested side effect in Pi;
 - run the V8 host in a separate disposable process;
-- use only documented Pi extension and Pi Factory APIs;
-- remove the current QuickJS runtime in one hard cutover.
+- use only documented Pi extension and Factory APIs;
+- remove the read-only tool-set contract in one hard cutover.
 
-This is a plan only. No compatibility layer will preserve the old runtime.
+The product contract is defined in [Build full Pi Code Mode](2026-08-31-code-mode-plan.md). No compatibility layer will preserve the read-only tool set.
 
 ---
 
@@ -43,8 +53,13 @@ pi-code-mode/
 │   ├── extension
 │   ├── standalone Pi Factory harness
 │   ├── OpenAI tool-contract adapter
+│   ├── mode selection and session state
+│   ├── Codex mode tool builder
+│   ├── Pi mode tool builder
+│   ├── extension tool registration
 │   ├── host client
 │   ├── tool broker
+│   ├── workspace and process sandbox
 │   └── executable installer/resolver
 │
 └── Rust Code Mode host
@@ -84,16 +99,19 @@ Rust code-mode host process
   v
 model-generated JavaScript
   |
-  | await tools.read(...)
+  | await tools.<selected-mode tool>(...)
   v
 Rust host sends tool/invoke
   |
   v
 TypeScript tool broker
   |
-  | policy, schema, approval, cancellation
+  | selected mode, tool set, schema, policy, cancellation, trace
   v
-parent-owned tool implementation
+selected Codex or Pi tool builder, plus allowed project or later MCP tools
+  |
+  v
+shared workspace and process sandbox
   |
   | JSON-safe result
   v
@@ -108,9 +126,9 @@ Generated JavaScript can request those operations only through the parent-side t
 
 ## OpenAI model contract
 
-Pi Code Mode will be an OpenAI-shaped implementation. This means the model-facing tools and prompt will follow the current public Codex Code Mode behavior, while the host protocol and runtime remain independent.
+Pi Code Mode will use an OpenAI-shaped provider contract. The outer `exec` and `wait` tools will follow current public Codex Code Mode behavior. Codex mode will also follow Codex's nested tool contract. Pi mode will keep the same outer tools but describe and expose Pi's nested coding tools instead. The host protocol and runtime will remain independent.
 
-The production implementation will not contain checks for GPT-5.6, Luna, Terra, Sol, or any other model name. Model names change. The stable contract is the tool format that the selected provider can send.
+The production implementation will not contain checks for any model name. Model identities change. The stable contract is the tool format and capability set that the selected provider can send.
 
 ### Boundary
 
@@ -193,12 +211,74 @@ Explicit pragma values take precedence over defaults. They cannot exceed the pac
 
 Code Mode activation will require both:
 
-- an explicit Pi Code Mode setting or standalone harness mode;
+- a selected `codex` or `pi` mode;
 - a selected OpenAI Responses-family provider that advertises grammar custom-tool support through Pi's documented model compatibility metadata.
 
 Activation will not use a model-name allowlist.
 
 If the provider cannot represent freeform `exec`, Code Mode will fail before the model request. It will not expose the old tools, use a JSON-shaped substitute, or guess from the provider name.
+
+### Mode selection
+
+The direct Pi extension and the standalone command will read one shared config file:
+
+```text
+$XDG_CONFIG_HOME/pi-code-mode/config.json
+```
+
+When `XDG_CONFIG_HOME` is not set, the path will be:
+
+```text
+~/.config/pi-code-mode/config.json
+```
+
+The config will have this shape:
+
+```json
+{
+  "mode": "codex",
+  "provider": "openai",
+  "model": "<compatible-model>",
+  "apiKeyEnv": "OPENAI_API_KEY"
+}
+```
+
+`mode` will accept only `codex` or `pi`. The config will store an API-key environment-variable name, not an API key. Writes will be atomic and will preserve fields that belong to the other entry point.
+
+The standalone command will also accept `--mode codex` and `--mode pi`. Selection order for a new session will be:
+
+1. the standalone `--mode` option;
+2. the saved `mode` value;
+3. `codex` as the default.
+
+The direct Pi extension will use only the saved `mode` from this file. It will continue to use Pi's active provider, model, and credentials. The standalone command will continue to read its saved provider, model, and API-key environment-variable name from the same file. A command-line mode will apply only to that run unless the user also passes `--save-config`.
+
+A missing `mode` will use the `codex` default. An invalid saved or command-line value will fail with a clear message. It will not select a mode by guessing. A recorded mode in a resumed session takes priority over new command-line or config values; a conflicting request must start a new session.
+
+The extension will add `/code-mode` so the user can select Codex mode or Pi mode. It will save the selection as the default for later sessions.
+
+The selected mode will be fixed when a Pi session starts. The extension will record one entry through Pi's documented session API. Codex mode needs only the mode and contract version:
+
+```json
+{
+  "mode": "codex",
+  "contractVersion": 1
+}
+```
+
+Pi mode will also record the recognized active vanilla built-ins that were present before the extension activated only `exec` and `wait`:
+
+```json
+{
+  "mode": "pi",
+  "piBuiltins": ["read", "bash", "edit", "write"],
+  "contractVersion": 1
+}
+```
+
+A resumed or branched session will use its recorded mode and Pi built-in set even when the shared config or Pi settings later change. Before the first model message, `/code-mode` can select the current session's mode and take a new Pi built-in snapshot. After the session contains model messages, it will save the new default and offer a new session instead of changing the active contract.
+
+Mode selection will never use the model name. There will be no automatic or mixed mode.
 
 ### Public OpenAI Responses first
 
@@ -206,7 +286,7 @@ The first release will use Pi's documented OpenAI Responses grammar-tool path. I
 
 Codex Responses Lite uses a separate internal request envelope, header, replay format, and namespace representation. That transport will not be part of the first core implementation. If it becomes necessary, it must be a separate adapter registered through Pi's public provider API. The host, broker, and model tool definitions must remain unchanged.
 
-Likewise, `tool_namespaces_info` is transport metadata rather than a runtime requirement. A later adapter can derive it from the frozen catalog when a documented or verified endpoint requires it. The core will not depend on it.
+Likewise, `tool_namespaces_info` is transport metadata rather than a runtime requirement. A later adapter can derive it from the frozen tool set when a documented or verified endpoint requires it. The core will not depend on it.
 
 ### Replay and session conversion
 
@@ -565,7 +645,7 @@ OMP persists language-kernel state across separate `eval` calls. Long-running wo
 
 #### Elements to adopt
 
-This plan can adopt OMP's provider metadata compatibility, generated TypeScript declarations, model-aware activation tests, and clear rendering of nested activity.
+This plan can adopt OMP's provider metadata compatibility, generated TypeScript declarations, provider-capability tests, and clear rendering of nested activity.
 
 This plan will not adopt ambient Bun authority, general language kernels, prompt-enforced restrictions, or persistent arbitrary JavaScript heaps. Those choices conflict with the plan's hostile-code trust model.
 
@@ -605,9 +685,10 @@ This plan remains different from current Codex in the following ways:
 2. It requires a documented operating-system process-isolation policy in addition to V8's own sandbox.
 3. It is a Pi extension and Pi Factory harness, not a modification to Pi core.
 4. It uses a TypeScript parent broker because Pi's public extension API owns tools and session context.
-5. Its initial nested catalog is intentionally narrow and read-only until each additional capability has a reviewed policy contract.
-6. It does not expose Codex-specific media helpers unless Pi has a documented value and rendering path for them.
-7. It will not depend on Codex binaries, protocols, source packages, or private provider behavior.
+5. It offers separate Codex and Pi modes instead of one fixed nested tool set.
+6. It exposes only the selected mode's built-in tools at the root of `tools`, mirrors vanilla Pi's active built-ins in Pi mode, and uses the same executors for equivalent work.
+7. It keeps network and credential capabilities out of the default coding profile.
+8. It will not depend on Codex binaries, private protocols, source packages, or private provider behavior.
 
 `deno_core` must remain an internal implementation detail. The guest will not receive Deno APIs. If the implementation cannot prevent `deno_core` from expanding the guest authority beyond the frozen tool catalog, the runtime choice fails the acceptance criteria.
 
@@ -633,7 +714,7 @@ It contains V8 and the protocol implementation, but it receives no credentials a
 
 The broker is trusted policy code.
 
-It owns the allowed tool catalog and validates every request from the host.
+It owns the allowed tool set, validates every request from the host, and routes each admitted call to the shared workspace, process, media, web, or extension executor.
 
 ### Tool implementation
 
@@ -641,7 +722,7 @@ A tool can perform real work.
 
 Each tool remains responsible for its normal validation, sandbox, approval, logging, and cancellation behavior.
 
-A compromised V8 host must not be able to invoke a tool that was not included in the cell’s frozen capability set.
+A compromised V8 host must not be able to invoke a tool that was not included in the cell's frozen tool set.
 
 ---
 
@@ -719,7 +800,9 @@ runtime/
 ```text
 src/
 ├── core/
+│   ├── config.ts
 │   ├── limits.ts
+│   ├── mode.ts
 │   ├── prompt.ts
 │   ├── result.ts
 │   └── types.ts
@@ -746,22 +829,40 @@ src/
 ├── broker/
 │   ├── broker.ts
 │   ├── catalog.ts
+│   ├── capability.ts
 │   ├── names.ts
 │   ├── schema.ts
 │   ├── values.ts
 │   ├── cancellation.ts
-│   ├── trace.ts
-│   └── tools/
-│       ├── read.ts
-│       ├── grep.ts
-│       ├── find.ts
-│       └── ls.ts
+│   ├── replay.ts
+│   └── trace.ts
+│
+├── modes/
+│   ├── codex/
+│   │   ├── exec-command.ts
+│   │   ├── write-stdin.ts
+│   │   └── apply-patch.ts
+│   ├── pi/
+│   │   ├── files.ts
+│   │   ├── search.ts
+│   │   └── bash.ts
+│   └── registration.ts
+│
+├── sandbox/
+│   ├── workspace.ts
+│   ├── paths.ts
+│   ├── scratch.ts
+│   ├── environment.ts
+│   ├── process-manager.ts
+│   └── policy.ts
 │
 ├── extension/
 │   ├── index.ts
 │   ├── exec-tool.ts
 │   ├── wait-tool.ts
 │   ├── lifecycle.ts
+│   ├── mode-command.ts
+│   ├── session-mode.ts
 │   └── rendering.ts
 │
 ├── harness/
@@ -897,7 +998,7 @@ Every cell will be bound to:
 - one Code Mode session;
 - one Pi session identifier;
 - one parent tool-call identifier;
-- one frozen capability catalog.
+- one frozen tool set.
 
 A request from another session cannot observe or terminate the cell.
 
@@ -911,7 +1012,7 @@ This gives the program top-level `await`.
 
 The runtime will use a module loader that rejects all static and dynamic imports.
 
-Example:
+Example in Pi mode:
 
 ```js
 const result = await tools.read({ path: "README.md" });
@@ -979,6 +1080,38 @@ The runtime will freeze:
 
 Generated code will not be able to replace a tool binding for later calls.
 
+The selected mode determines the built-in root names.
+
+Codex mode will preserve exact Codex-compatible names:
+
+```text
+tools.exec_command
+tools.write_stdin
+tools.apply_patch
+```
+
+Optional Codex-compatible media and web tools can use `tools.view_image`, `tools.web_run`, and `tools.imagegen` after their contracts are implemented.
+
+Pi mode will mirror vanilla Pi's active built-in names at the same root. Vanilla Pi enables this set by default:
+
+```text
+tools.read
+tools.bash
+tools.edit
+tools.write
+```
+
+Pi's optional built-ins will appear only when Pi has them active:
+
+```text
+tools.powershell
+tools.grep
+tools.find
+tools.ls
+```
+
+A cell will receive only one mode's built-in set. Codex mode will not install Pi built-ins, and Pi mode will not install Codex built-ins. Both modes will call the same workspace and process code for equivalent work.
+
 ---
 
 ## Global removals
@@ -1006,30 +1139,33 @@ The implementation will review whether to keep:
 
 ## Tool naming
 
-Tool names must become valid and stable JavaScript property names.
+Tool paths must become valid and stable JavaScript properties.
 
-The primary API will always support bracket access:
+The tool definition carries an `sdkPath` such as `["exec_command"]`, `["read"]`, or `["project", "issue.search"]`. The SDK generator builds and freezes the matching object tree for the selected mode.
+
+Bracket access remains available for unusual project and MCP names:
 
 ```js
-await tools["mcp__server__tool"]({ value: 1 });
+await tools.project["issue.search"]({ query: "sandbox" });
 ```
 
-Dot access will work when the name is a safe identifier:
+Dot access is used for safe identifiers. In Pi mode:
 
 ```js
 await tools.read({ path: "README.md" });
 ```
 
-Normalization will:
+Tool-set construction will:
 
-- preserve safe ASCII names;
-- replace namespace separators with `__`;
-- reject empty names;
-- reject reserved global names;
-- reject collisions;
+- reserve the built-in root names for the selected mode;
+- include only registrations that allow the selected mode;
+- preserve safe ASCII path segments;
+- reject empty or dangerous segments;
+- reject reserved global names and prototype keys;
+- reject collisions between a function and an object path;
 - avoid silent suffix generation.
 
-A collision will fail catalog creation. It will not select a winner by accident.
+A collision will fail tool-set creation. It will not select a winner by accident.
 
 ---
 
@@ -1054,29 +1190,29 @@ const matches = ALL_TOOLS.filter(
 text(matches);
 ```
 
-The first release will not add an OpenClaw-style `catalog.search()` runtime API. It is not part of the Codex guest contract and would add another host operation.
+The cutover can keep `ALL_TOOLS` as the first discovery mechanism. A later search capability can add bindings to the next cell for large Pi and MCP catalogs. It must not expand a running cell's frozen authority.
 
-The implementation will use deterministic sorting so the same frozen tool set creates the same declarations and tool names. Complete input schemas can remain in the parent broker and generated declarations; they do not need to enter model context for deferred tools.
+The implementation will use deterministic sorting so the same frozen tool set creates the same declarations and tool paths. Complete input schemas can remain in the parent broker and generated declarations; they do not need to enter model context for deferred tools.
 
 ---
 
-## Tool descriptors
+## Tool definitions
 
 The TypeScript broker will define:
 
 ```typescript
-type CodeModeToolDescriptor = {
-  name: string;
-  codeModeName: string;
+type CodeModeTool = {
+  id: string;
+  sdkPath: readonly string[];
+  modes: readonly ("codex" | "pi")[];
   description: string;
   usage?: string;
   kind: "function" | "freeform";
   inputSchema?: unknown;
   outputSchema?: unknown;
-  deferred?: boolean;
+  deferred: boolean;
   effect: "read" | "write" | "execute" | "network" | "interactive";
   replay: "safe" | "unsafe";
-  directOnly?: boolean;
   invoke: (
     input: unknown,
     context: CodeModeInvocationContext,
@@ -1089,6 +1225,7 @@ type CodeModeToolDescriptor = {
 
 ```typescript
 type CodeModeInvocationContext = {
+  mode: "codex" | "pi";
   sessionId: string;
   cellId: string;
   parentToolCallId: string;
@@ -1097,13 +1234,13 @@ type CodeModeInvocationContext = {
 };
 ```
 
-The `invoke` callback stays in the parent TypeScript process.
+The `invoke` callback stays in the parent TypeScript process. The host receives metadata but never receives the callback.
 
-The host receives metadata but never receives the callback.
+The tool builder first removes definitions that do not allow the session's mode. It then admits read, write, execute, network, and interactive effects only when the matching executor and policy exist. The broker must not enforce read-only access as a substitute for sandboxing. The default production profile admits workspace read, write, patch, and sandboxed execution effects, while network remains disabled.
 
 ---
 
-## Frozen capability sets
+## Frozen tool sets
 
 The broker will freeze a cell’s tools before source execution begins.
 
@@ -1113,20 +1250,57 @@ A host request will be valid only when:
 - the session is active;
 - the cell is active;
 - the nested call ID is new;
-- the requested tool is in the frozen catalog;
+- the requested tool is in the frozen tool set;
 - the input passes schema validation;
 - the call limit has not been reached;
 - the cell has not expired or been cancelled.
 
-Changing active Pi tools during a cell will not expand that cell’s authority.
+Changing registered project tools during a cell will not expand that cell’s authority.
 
-A later `exec` call can receive a new catalog.
+A later `exec` call can receive a new tool set for the same session mode. It cannot switch the session between Codex mode and Pi mode.
+
+---
+
+## Workspace and process sandbox
+
+Side effects will not run inside the Deno Core host. The TypeScript broker routes them to one shared workspace and process sandbox used by both mode builders and registered tools.
+
+### Writable roots
+
+The production coding profile exposes two writable roots:
+
+- the selected workspace;
+- one private scratch directory mapped as `/tmp` for the Pi session.
+
+The real system `/tmp` and real home directory remain unavailable. Scratch storage is bounded and removed during session shutdown.
+
+Path operations must reject parent traversal, symlink and junction escapes, magic links, device paths, and validation-to-use races. Writes and edits use atomic replacement where possible and Pi's file-mutation queue for operations on the same path.
+
+### Process manager
+
+Codex `exec_command`, Pi `bash`, and Pi `powershell` use one process manager. It supports foreground commands, yielded background handles, output polling, standard-input writes, waiting, termination, and complete process-tree cleanup.
+
+Only the Codex contract exposes background command handles and `write_stdin`. Pi's shell tools preserve vanilla Pi's input, output, timeout, and cancellation contract. Pi Code Mode will not add Codex process-control fields or results to a Pi tool.
+
+Process handles belong to one Pi session and expire after completion or cleanup. The process manager bounds command count, child count, memory, runtime, idle time, input, and retained output.
+
+The outer `wait` tool observes a V8 cell. Nested `exec_command` and `write_stdin` calls control Codex command processes. Their identifiers and state machines must not be interchangeable.
+
+### Command environment
+
+Each command receives a new environment built from an allowlist. Nested commands must not inherit provider keys, tokens, SSH or GPG agents, credential-helper sockets, cloud configuration, package-registry credentials, Pi session variables, restart controls, or the user's real home path.
+
+The command uses a private home directory and the session scratch directory. Pi's shell session-environment injection is disabled for nested commands.
+
+### Network
+
+Network access is disabled in the default coding profile. A future network capability must define destination policy, DNS behavior, credentials, observability, and tests before admission. V8 will never receive an ambient network API.
 
 ---
 
 ## Nested tool protocol
 
-A generated call:
+A generated call in Pi mode:
 
 ```js
 const result = await tools.read({ path: "README.md" });
@@ -1646,7 +1820,8 @@ Pi’s tool abort signal will propagate through all layers.
 Pi AbortSignal
   -> TypeScript client request cancellation
   -> host cell termination
-  -> pending tool cancellation
+  -> pending capability cancellation
+  -> sandboxed command process-group termination
   -> V8 isolate termination
 ```
 
@@ -1658,23 +1833,15 @@ A late host response must be ignored and recorded only as bounded diagnostic inf
 
 ---
 
-## Approval policy
+## Side-effect policy
 
-There will be no approval prompt for the JavaScript source itself.
+There will be no approval prompt for JavaScript source and no blanket approval gate before each normal workspace action. The production coding profile admits bounded reads, writes, patches, and sandboxed commands automatically.
 
-Nested operations will use their normal action policy.
+Each operation still passes through its capability executor, schema, workspace policy, process policy, cancellation path, replay rule, and trace. Network, credential, and interactive capabilities require their own explicit contracts before catalog admission.
 
-Examples:
+An interactive capability can ask the user through Pi when consent is part of that capability. Approval of one call does not approve later calls automatically.
 
-- a read-only file tool can run automatically;
-- a write tool can require policy approval;
-- shell execution can use the normal command approval path;
-- network access can use a domain or tool policy;
-- credential access remains unavailable unless a specific tool owns that operation.
-
-Approving one nested call will not approve later calls automatically unless the parent tool policy explicitly provides a bounded rule.
-
-The V8 host has no authority to grant approval.
+The V8 host has no authority to grant access, approval, or policy exceptions.
 
 ---
 
@@ -1754,6 +1921,7 @@ The TypeScript broker will collect bounded trace records:
 
 ```typescript
 type NestedToolTrace = {
+  mode: "codex" | "pi";
   callId: string;
   tool: string;
   status: "running" | "completed" | "failed" | "cancelled";
@@ -1782,7 +1950,11 @@ The extension will register:
 
 Before activation, it will verify that the selected OpenAI Responses-family model configuration advertises grammar custom-tool support. This is a capability check, not a model-name check.
 
-On session start, it will save the previous active tool names and activate only:
+On session start, it will resolve one mode from the session entry, shared config, or default. For a new Pi-mode session, it will snapshot the active vanilla Pi built-ins before hiding the top-level tool set. It will record the mode, contract version, and Pi built-in names, then build only that mode's nested tools and prompt. A resumed or branched session will keep its recorded mode and Pi built-in set.
+
+The extension will register `/code-mode`. Before the first model message, the command can set the session mode. After model messages exist, it will save the new default and offer a new session instead of changing the current tool contract.
+
+The extension will then save the previous active tool names and activate only:
 
 ```text
 exec
@@ -1823,9 +1995,11 @@ The harness will create and own:
 
 - the Code Mode host client;
 - the broker;
-- the fixed system prompt;
+- the mode-specific system prompt;
 - the model-visible `exec` and `wait` tools;
 - separate Code Mode settings and session storage.
+
+The harness will read the shared config, accept `--mode codex` and `--mode pi`, and use command line, saved config, then `codex` as the selection order. It will record the resolved mode for the Pi session. `--save-config` will save the command-line selection; without it, the override applies only to the current run.
 
 It will not implement a custom REPL.
 
@@ -1843,34 +2017,35 @@ A complete provider override through `pi.registerProvider()` is allowed only for
 
 The implementation will follow these boundaries.
 
-### Extension mode
+### Pi mode built-in tools
 
-The extension can expose nested tools that `pi-code-mode` owns.
+Vanilla Pi ships `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. A normal session enables `read`, `bash`, `edit`, and `write` by default. `powershell`, `grep`, `find`, and `ls` are optional built-ins selected through Pi's settings or explicit tool allowlist.
 
-The first set will remain:
+Before the extension replaces the provider-visible tools with `exec` and `wait`, it will snapshot `pi.getActiveTools()` and inspect `pi.getAllTools()` metadata. The Factory harness will take the same snapshot from its own Pi session. The Pi mode builder will include only recognized vanilla built-ins that were active in that snapshot.
 
-- `read`;
-- `grep`;
-- `find`;
-- `ls`.
+It will create those tools through the documented read, bash, PowerShell, edit, write, grep, find, and `ls` factories. Secure custom operations will replace a default operation only when the standard operation would exceed the Code Mode workspace or process policy. Names, inputs, results, errors, truncation, cancellation, and prompt guidance will remain compatible with vanilla Pi.
 
-Additional capabilities require explicit implementations and security review.
+An extension can override a built-in name, but public metadata does not provide the override's execution callback. When `sourceInfo` shows that an active built-in name belongs to an extension, Pi Code Mode will not silently create the vanilla implementation under that name. The extension must use explicit Code Mode registration.
 
-### Standalone Factory mode
+The Pi mode builder does not install Codex built-ins. Equivalent work in Codex and Pi modes uses the same workspace or process executor, but each mode keeps its own observable tool contract.
 
-The Factory harness can own a larger broker because it controls session construction and tool definitions.
+### Explicit extension registration
 
-During implementation, the project must verify which built-in tool constructors are public and whether their complete execution callbacks can be supplied to the broker.
+A cooperating extension can register a nested tool through a documented Code Mode handshake on Pi's public extension event bus. The registration carries the tool definition, its allowed `codex` and/or `pi` modes, and its execution callback.
 
-### Missing Pi capability
+Registration happens during session startup. The tool builder first removes registrations that do not allow the session's mode. It then validates, sorts, and freezes the accepted tools before the first model turn. Late registration can affect only a later tool-set generation in the same mode and never a running cell.
 
-Full wrapping of arbitrary active tools would require a documented API similar to:
+Interactive registrations are serialized. Invalid effects, schemas, SDK paths, collisions, or callbacks fail registration visibly.
+
+### Missing generic invocation API
+
+Automatic wrapping of every active Pi tool would require a documented API similar to:
 
 ```typescript
 pi.invokeTool(name, input, context, signal);
 ```
 
-The project will not use Pi internals to simulate this API.
+The project will not use Pi internals to simulate this API. Tools that do not opt into the Code Mode registration contract remain unavailable inside `exec`.
 
 ---
 
@@ -1880,20 +2055,25 @@ The model-facing `exec` description will state:
 
 - input is raw JavaScript source, not JSON, a quoted string, or a Markdown fence;
 - source runs as an asynchronous module in a fresh restricted V8 isolate;
-- available capabilities are methods on `tools`;
+- the active mode is `codex` or `pi`;
+- Codex mode uses exact Codex-compatible root names on `tools`;
+- Pi mode uses the exact active vanilla Pi built-in names at the root of `tools`;
+- the other mode's built-in tools are absent;
+- project and deferred tools are described through stable SDK paths and `ALL_TOOLS`;
 - tool calls must be awaited;
 - intermediate values stay in the program;
 - `text()` produces output;
 - a first-line `// @exec:` pragma can set bounded yield and output options;
 - `wait` applies only to a returned `cell_id`;
 - direct filesystem, shell, network, module, environment, Node, and Deno access is unavailable;
+- workspace effects use brokered tools and the shared sandbox;
 - loops and retries must remain bounded.
 
 The description will include deterministic TypeScript declarations for promoted nested tools and bounded discovery guidance for deferred tools in `ALL_TOOLS`.
 
 The package will keep one canonical OpenAI tool-description fixture. Tests will fail when the public `exec` or `wait` contract changes unintentionally.
 
-The prompt will not mention GPT-5.6 or claim that JavaScript can access a capability that the broker did not provide.
+The prompt will not mention a model name or claim that JavaScript can access a capability that the broker did not provide.
 
 ---
 
@@ -2183,15 +2363,25 @@ Fixtures will be authored for this package's contract. They will not import fixt
 Integration tests will start Pi with the built extension or Factory harness and verify:
 
 - only `exec` and `wait` are model-visible;
-- the prompt describes the actual guest API;
-- a program can inspect a harmless fixture;
+- the prompt describes the selected mode's actual guest API;
+- Codex mode exposes Codex built-ins and no Pi built-ins;
+- Pi mode defaults to `read`, `bash`, `edit`, and `write` and exposes no Codex built-ins;
+- Pi mode includes `powershell`, `grep`, `find`, and `ls` only when they were active in Pi;
+- an extension override of a Pi built-in requires explicit Code Mode registration;
+- each mode can inspect and change a harmless fixture;
+- each mode can run a sandboxed command;
+- Codex mode can control a long-running command through `exec_command` and `write_stdin`;
+- Pi mode preserves vanilla Pi's shell-tool contract without Codex-only fields or results;
 - a program can call tools in parallel;
 - a yielded program can complete through `wait`;
+- `--mode` overrides saved config only for the current standalone run unless `--save-config` is present;
+- `/code-mode` can select a mode before model messages and does not change an active conversation after model messages;
+- resumed and branched sessions keep their recorded mode and Pi built-in set after settings change;
+- mode selection does not inspect model names;
 - shutdown removes the host process;
 - reload does not duplicate tools or host clients;
 - the previous active tool list is restored;
-- session state contains normal tool calls and results;
-- no custom Pi state schema is added;
+- session state contains normal tool calls, results, and one extension-owned contract entry with any Pi built-in names;
 - normal Pi remains unchanged outside Code Mode.
 
 ---
@@ -2200,20 +2390,27 @@ Integration tests will start Pi with the built extension or Factory harness and 
 
 A fixed test suite will measure whether a model can use the interface.
 
-Model identifiers belong only in test configuration and result records. Production activation logic will not read this matrix. The initial external matrix can include the requested GPT-5.6 models, but adding or removing a test model must require no package code change.
+Model identifiers belong only in test configuration and result records. Production activation logic will not read this matrix. The matrix must include more than one compatible model when they are available, and adding or removing a test model must require no package code change.
 
 Tasks will include:
 
-1. read two files and compare them;
+1. run the same file-reading task separately in Codex mode and Pi mode;
 2. search several files and return only matching names;
-3. perform dependent calls;
-4. use `Promise.all`;
-5. handle one tool failure;
-6. reduce large intermediate results;
-7. call `yield_control()` and continue with `wait`;
-8. avoid forbidden direct APIs;
-9. stop at a bounded result;
-10. distinguish a cell ID from a nested process ID.
+3. create and edit a workspace file in each mode;
+4. apply a patch in Codex mode and make the equivalent edit in Pi mode;
+5. create and clean up a private `/tmp` file;
+6. run a command and inspect its output in each mode;
+7. start a long Codex command, send input, wait, and terminate;
+8. preserve vanilla Pi's shell parameters, results, timeout, and cancellation behavior;
+9. reject attempts to call the other mode's built-in names;
+10. perform dependent calls;
+11. use `Promise.all`;
+12. handle one tool failure;
+13. reduce large intermediate results;
+14. call `yield_control()` and continue with `wait`;
+15. avoid forbidden direct APIs and credentials;
+16. stop at a bounded result;
+17. distinguish a cell ID from a nested process ID.
 
 The suite will save prompts, generated code, raw tool traces, results, and model metadata.
 
@@ -2272,242 +2469,215 @@ The host will never invent token counts or tokens per second. Those require prov
 
 ## Hard cutover
 
-The new runtime will replace the current runtime in place.
+The Deno Core runtime has replaced the old QuickJS runtime. The next cutover replaces the read-only capability contract in place.
 
-The cutover will:
+The capability cutover will:
 
-- remove `quickjs-emscripten`;
-- delete the old QuickJS worker;
-- delete the synchronous host bridge;
-- remove old runtime-only tests;
-- replace `executeProgram()` internals with the host client;
-- add `wait`;
-- change results to the new cell-aware union;
-- update prompts;
-- update the standalone harness;
-- update package contents;
-- update installation instructions.
+- remove the broker rule that rejects non-read effects;
+- add explicit `codex` and `pi` modes;
+- add the shared config, standalone `--mode` option, `/code-mode` command, and recorded session mode;
+- build only the selected mode's built-in tool set for each session;
+- add exact Codex core tools at the root of `tools` in Codex mode;
+- mirror Pi's active vanilla built-ins at the root of `tools` in Pi mode;
+- add the shared workspace and process sandbox;
+- add session-scoped `/tmp`;
+- add persistent command handles and input;
+- add explicit extension tool registration for one or both modes;
+- replace read-only prompts, tests, and plan text;
+- update the standalone harness and package contents.
 
-There will be no old-runtime flag.
+There will be no old-catalog flag, parallel `v2`, or read-only compatibility path. The package and executable names stay unchanged.
 
-There will be no automatic fallback to the old QuickJS implementation.
-
-If the Rust host is unavailable, Code Mode will fail with `runtime_unavailable`.
+If the Rust host or required sandbox is unavailable, Code Mode will fail visibly. It will not fall back to an ambient or less capable runtime.
 
 ---
 
 ## Versioning
 
-This is a breaking runtime and API change.
+The Deno Core cutover established protocol version 1. The capability cutover will keep version 1 when existing tool metadata and invocation messages can represent the new catalog safely.
 
-The package should move from `0.1.x` to `0.2.0`.
-
-The protocol will begin at version `1`.
-
-Package version and host version can differ, but the client must declare the exact protocol versions it supports.
-
-A host update that breaks protocol version 1 requires protocol version 2 and an explicit client update.
+A wire-format change that cannot preserve protocol version 1 requires an explicit protocol change and matching client update. Package version, host version, and protocol version remain separate values. The release version will follow the repository's semantic-versioning policy after the final implementation scope is known.
 
 ---
 
 ## Implementation phases
 
-### Phase 1: Freeze the contract
+The Deno Core host, versioned protocol, `exec`, `wait`, Pi extension, standalone harness, Linux host sandbox, and initial release artifacts are complete. The remaining phases replace the read-only capability contract.
+
+### Phase 1: Freeze the two mode contracts
 
 Deliver:
 
-- architecture record;
-- threat model;
-- exact OpenAI freeform `exec` grammar;
-- exact OpenAI `wait` function schema;
-- provider capability and activation rules without model-name checks;
-- replay conversion rules for custom and function tool calls;
-- protocol version 1 schema;
-- cell state machine;
-- error taxonomy;
-- limit table;
-- Pi API boundary;
-- package distribution decision.
+- exact Codex core request and result fixtures;
+- exact Pi built-in request and result fixtures;
+- Pi's default and optional built-in selection rules;
+- root tool names for each mode;
+- a mode-aware tool definition;
+- reserved names and collision rules for each mode;
+- workspace and scratch path rules;
+- command and process state machines;
+- trace and error shapes;
+- explicit extension registration contract with allowed modes.
 
 Exit criteria:
 
-- every message type is defined;
-- every terminal state is defined;
-- arbitrary Pi tool invocation limitation is documented;
-- no unresolved compatibility path remains.
+- every Codex core call and process state is defined;
+- every Pi built-in call is defined;
+- Pi mode defaults to `read`, `bash`, `edit`, and `write`;
+- optional Pi built-ins appear only when active in Pi;
+- one session cannot receive both built-in sets;
+- equivalent work in both modes maps to one executor;
+- no model identity appears in activation logic or compatibility criteria;
+- no read-only or mixed compatibility path remains in the plan.
 
-### Phase 2: Build protocol libraries
+### Phase 2: Add mode selection and session state
 
 Deliver:
 
-- Rust framing and message crate;
-- TypeScript framing and message module;
-- shared fixtures;
-- handshake;
-- subprocess startup and shutdown;
-- fake host used by TypeScript tests.
+- the shared config path and schema;
+- `codex` and `pi` value validation;
+- `codex` as the documented default;
+- standalone `--mode` and `--save-config` handling;
+- the direct Pi `/code-mode` command;
+- a snapshot of active Pi built-ins before activating `exec` and `wait`;
+- the extension-owned session contract entry with mode and any Pi built-in names;
+- separate prompt and declaration builders for both modes.
 
 Exit criteria:
 
-- malformed input fails closed;
-- Rust and TypeScript pass the same fixtures;
-- host process lifecycle has no orphan process.
+- standalone precedence is command line, saved config, then default;
+- direct Pi uses the saved mode but keeps Pi's active provider, model, credentials, and built-in selection;
+- the standalone harness applies its own Pi settings to the same built-in selection rules;
+- resumed and branched sessions keep their recorded mode and Pi built-in set;
+- an active conversation cannot change mode in place;
+- mode selection never reads a model name.
 
-### Phase 3: Add one-shot V8 execution
+### Phase 3: Build the workspace sandbox
 
 Deliver:
 
-- `deno_core` runtime crate;
-- V8 startup;
-- main module evaluation;
-- `text()`;
-- no module loader;
-- CPU, memory, source, and output limits.
+- workspace and session scratch roots;
+- `/tmp` mapping;
+- symlink-safe and race-safe path operations;
+- atomic writes and edits;
+- patch application;
+- Pi file-mutation queue integration;
+- scratch quotas and cleanup.
 
 Exit criteria:
 
-- safe JavaScript executes;
-- forbidden globals are absent;
-- infinite loops terminate;
-- memory exhaustion does not kill Pi;
-- no tools are available yet.
+- normal create, read, edit, patch, rename, and cleanup cases pass;
+- traversal, symlink, magic-link, device, and race attacks fail;
+- no path outside the workspace or private scratch root can be changed.
 
-### Phase 4: Add asynchronous tool delegation
+### Phase 4: Build the process manager
 
 Deliver:
 
-- generated `tools`;
-- async Rust operation;
-- host-to-client `tool/invoke`;
-- TypeScript broker;
-- schema validation;
-- cancellation;
-- parallel calls;
-- bounded traces.
+- a sandboxed command launcher;
+- a sanitized allowlisted environment;
+- private home and scratch paths;
+- foreground and background command states;
+- bounded output polling;
+- standard-input writes;
+- wait, terminate, timeout, and process-tree cleanup;
+- process, memory, output, and lifetime limits.
 
 Exit criteria:
 
-- sequential and parallel calls pass;
-- guessed tools fail;
-- tool cancellation works;
-- tool errors reach JavaScript correctly.
+- harmless workspace commands and tests run;
+- long commands can yield, receive input, finish, and terminate;
+- cancellation and shutdown leave no child process;
+- credentials, agents, control sockets, real home files, and default network access remain unavailable.
 
-### Phase 5: Add live cells and `wait`
+### Phase 5: Add Codex mode tools
 
 Deliver:
 
-- cell actors;
-- initial yield deadline;
-- `yield_control()`;
-- output cursors;
-- `wait`;
-- termination;
-- TTL cleanup;
-- host health monitoring.
+- `tools.exec_command`;
+- `tools.write_stdin`;
+- `tools.apply_patch`;
+- stable output and error conversion;
+- command and patch traces;
+- replay protection for side effects.
 
 Exit criteria:
 
-- a program can yield and finish later;
-- output does not repeat;
-- wrong-session access fails;
-- expired cells are removed;
-- no VM snapshots are used.
+- the Codex mode tools pass exact contract fixtures;
+- a compatible model can edit and test a fixture project through one JavaScript program;
+- no Codex binary, private protocol, or runtime dependency is present.
 
-### Phase 6: Integrate the OpenAI contract and Pi extension
+### Phase 6: Add Pi mode tools
 
 Deliver:
 
-- raw-source `exec` through Pi's grammar `constrainedSampling` contract;
-- structured `wait` with `cell_id`, `yield_time_ms`, `max_tokens`, and `terminate`;
-- provider capability checks without model-name checks;
-- custom-tool and function-tool replay conversion tests;
-- active tool enforcement;
-- canonical OpenAI-shaped prompt and tool-description fixtures;
-- nested trace rendering;
-- session lifecycle;
-- shutdown cleanup.
+- default `tools.read`, `tools.bash`, `tools.edit`, and `tools.write`;
+- optional `tools.powershell`, `tools.grep`, `tools.find`, and `tools.ls` when active in Pi;
+- active built-in snapshot and source checks;
+- documented Pi factory and operation integration;
+- explicit-registration handling for extension overrides.
 
 Exit criteria:
 
-- a compatible OpenAI Responses provider receives freeform `exec` and function `wait`;
-- an incompatible provider fails before a model turn without restoring broad tools;
-- standard Pi exposes only `exec` and `wait`;
-- no production source contains GPT model aliases for activation;
-- replay preserves raw `exec` source and correct output item types;
-- reload is safe;
-- no private Pi API is used;
-- extension mode retains its documented nested-tool limit.
+- Pi names, parameters, results, errors, prompt guidance, cancellation, truncation, and mutation queues match vanilla Pi;
+- the default and optional built-in selections match Pi settings and explicit allowlists;
+- extension overrides are not silently replaced by vanilla implementations;
+- Pi mode contains no Codex built-in names;
+- Pi shell tools and Codex command execution use the same process manager while keeping different public contracts;
+- Pi file tools and Codex patching use the same workspace policy.
 
-### Phase 7: Integrate the Pi Factory harness
+### Phase 7: Add explicit extension registration
 
 Deliver:
 
-- host client ownership;
-- broker ownership;
-- persistent nonsecret config;
-- standard InteractiveMode;
-- provider and model selection;
-- local host development path.
+- a public event-bus handshake;
+- required `codex` and/or `pi` mode declarations;
+- startup registration, mode filtering, and validation;
+- deterministic tool-set generations;
+- interactive call serialization;
+- bounded deferred metadata in `ALL_TOOLS`.
 
 Exit criteria:
 
-- `pi-code-mode` opens a regular Pi window;
-- session history remains separate;
-- API keys stay in their existing store or memory;
-- no custom REPL exists.
+- a cooperating extension can register and execute a nested tool without a private Pi API;
+- invalid or colliding registrations fail visibly;
+- late registration cannot expand a running cell.
 
-### Phase 8: Add OS hardening
+### Phase 8: Add traces and optional tools
 
 Deliver:
 
-- Linux restrictions;
-- macOS restrictions or explicit unsupported status;
-- Windows restrictions or explicit unsupported status;
-- process resource limits;
-- host health and replacement behavior.
+- nested progress rendering;
+- changed-file summaries;
+- command state and exit details;
+- bounded diagnostics;
+- optional media, web, and MCP adapters only after their contracts and policies are complete.
 
 Exit criteria:
 
-- each supported target passes a real sandbox test;
-- unsupported targets fail before model execution;
-- documentation does not overstate isolation.
+- every side effect is visible in expanded Pi output;
+- intermediate data remains outside model context unless JavaScript emits it;
+- secrets and unrestricted environments never enter traces.
 
-### Phase 9: Build release artifacts
+### Phase 9: Hard cutover
 
 Deliver:
 
-- target matrix;
-- checksums;
-- signatures;
-- platform package or installer;
-- protocol metadata;
-- clean package manifests;
-- release verification.
+- read-only tool-set restriction removed;
+- old read-only declarations removed;
+- two mode prompts and declarations made authoritative;
+- mode selection enabled in the extension and standalone harness;
+- read-only tests replaced;
+- docs and package contents updated;
+- local installation refreshed.
 
 Exit criteria:
 
-- normal users do not build V8;
-- artifact identity is verified before execution;
-- each target runs a real Code Mode request.
-
-### Phase 10: Hard cutover
-
-Deliver:
-
-- old runtime removed;
-- dependency cleanup;
-- new tests authoritative;
-- docs updated;
-- package version updated;
-- global installation refreshed.
-
-Exit criteria:
-
-- repository search finds no old runtime path;
-- complete checks pass;
-- clean install works;
-- one real model completes the compatibility suite;
-- the old runtime cannot be selected.
+- repository search finds no active read-only product contract;
+- complete local and CI checks pass;
+- clean installation works;
+- multiple compatible models complete both mode-specific suites;
+- the old catalog cannot be selected.
 
 ---
 
@@ -2515,37 +2685,54 @@ Exit criteria:
 
 The implementation is complete only when all these conditions hold:
 
-1. The model sees only `exec` and `wait`.
-2. A compatible OpenAI Responses provider sees `exec` as a raw-source custom tool with the canonical Lark grammar.
-3. The model sees `wait` as a function tool with the canonical snake-case fields.
+1. The provider sees only `exec` and `wait`.
+2. A compatible provider sees `exec` as a raw-source custom tool with the canonical Lark grammar.
+3. The provider sees `wait` as a function tool with the canonical snake-case fields.
 4. Production activation uses provider capabilities and contains no model-name allowlist.
 5. `exec` can run arbitrary bounded JavaScript.
 6. JavaScript has no direct host capabilities.
 7. Nested tools run only through the parent broker.
-8. The broker enforces a frozen tool catalog.
-9. Tool schemas are checked before execution.
-10. Parallel tool calls return to the correct promises.
-11. Intermediate results can remain inside V8.
-12. Output is explicit and bounded.
-13. A long cell can yield and complete through `wait`.
-14. `wait` never reruns source.
-15. A cancelled or expired cell cannot revive.
-16. V8 failure cannot crash the Pi process.
-17. Infinite loops stop.
-18. Memory bombs stop.
-19. Oversized frames stop.
-20. Host unavailability fails visibly.
-21. No QuickJS fallback exists.
-22. No JSON function fallback replaces freeform `exec`.
-23. No source approval prompt exists.
-24. Nested action policy remains active.
-25. Credentials never enter the host process.
-26. OpenAI request and authentication state never enter the host protocol.
-27. The extension uses documented Pi APIs only.
-28. The package does not depend on Codex or `pi-codex-conversion` at runtime.
-29. The standalone executable remains a regular Pi TUI.
-30. Cross-platform artifacts are pinned and verified.
-31. Complete TypeScript and Rust checks pass.
+8. The broker enforces a frozen tool set with stable SDK paths.
+9. Every session selects exactly one `codex` or `pi` mode.
+10. Codex mode exposes exact Codex built-in names at the root of `tools`.
+11. Pi mode mirrors the active vanilla Pi built-ins at the root of `tools`.
+12. Pi mode defaults to `read`, `bash`, `edit`, and `write`.
+13. Pi mode includes `powershell`, `grep`, `find`, and `ls` only when Pi has them active.
+14. An extension override of a Pi built-in requires explicit Code Mode registration.
+15. Neither mode exposes the other mode's built-in names.
+16. The selected mode and Pi built-in set are recorded and fixed for resumed and branched sessions.
+17. The direct extension and standalone command use the shared config path.
+18. Standalone mode precedence is command line, saved config, then `codex`.
+19. `/code-mode` does not change the contract after model messages exist.
+20. Equivalent work in Codex and Pi modes shares one executor while preserving each public contract.
+21. Tool schemas are checked before execution.
+22. Parallel calls return to the correct promises.
+23. Intermediate results can remain inside V8.
+24. Output is explicit and bounded.
+25. A long cell can yield and complete through `wait`.
+26. `wait` never reruns source.
+27. Workspace files and session `/tmp` can be created, edited, patched, and read.
+28. Codex commands can start, yield, receive input, finish, and terminate.
+29. Pi shell tools preserve vanilla Pi's parameters, results, timeout, and cancellation behavior.
+30. Commands cannot escape the workspace sandbox or access the real home directory.
+31. Nested commands receive no provider key, token, authentication agent, credential socket, or Pi session state.
+32. Network is unavailable under the default coding policy.
+33. Every nested side effect is visible in bounded Pi traces.
+34. Replay cannot duplicate an unsafe completed side effect.
+35. A cancelled or expired cell cannot revive.
+36. Cancellation and shutdown remove complete command process trees.
+37. V8 or command failure cannot crash the Pi process.
+38. Infinite loops, memory bombs, oversized frames, and output floods stop.
+39. Host or sandbox unavailability fails visibly.
+40. No QuickJS, read-only tool set, mixed mode, JSON-function, ambient-execution, or direct-tool fallback exists.
+41. No source approval prompt or blanket workspace-action gate exists.
+42. OpenAI request and authentication state never enter the host protocol.
+43. The extension uses documented Pi APIs only.
+44. Third-party Pi tools require explicit registration for one or both modes rather than private callback discovery.
+45. The package does not depend on Codex or `pi-codex-conversion` at runtime.
+46. The standalone executable remains a regular Pi TUI.
+47. Supported artifacts are pinned and verified.
+48. Complete TypeScript, Rust, integration, hostile-code, packaging, and CI checks pass.
 
 ---
 
@@ -2559,11 +2746,9 @@ If the selected provider cannot preserve raw `exec` input and custom-tool replay
 
 ### Arbitrary Pi tools
 
-Pi metadata does not include execution callbacks. The extension cannot wrap arbitrary installed tools through current public API.
+Pi metadata does not include execution callbacks, so the extension cannot automatically wrap every installed tool through the current public API.
 
-This blocks a fully generic drop-in extension.
-
-It does not block the standalone harness or explicitly owned nested tools.
+The production design snapshots active vanilla Pi built-ins, creates those known tools explicitly, and provides an opt-in registration contract for cooperating extensions and overrides. Tools that do not register remain outside Code Mode. A future documented Pi invocation API could broaden this without changing the host protocol.
 
 ### Cross-platform OS sandbox
 
@@ -2583,31 +2768,23 @@ Platform packages or release assets are remote resources.
 
 Their names, ownership, and publication method must be approved before creation.
 
-### Tool side effects
+### Workspace and process sandbox
 
-Automatic JavaScript execution can make many nested calls.
-
-Every side-effecting capability needs clear parent-side policy before it enters the catalog.
+Automatic JavaScript execution can make many side-effecting calls. Writes and commands cannot enter the production catalog until the shared workspace and process sandbox passes traversal, credential, environment, network, cancellation, process-tree, replay, and cleanup tests.
 
 ---
 
 ## Deliberately excluded work
 
-The first production release will not include:
+The production design will not include:
 
 - VM heap snapshots;
-- persistent JavaScript cells across host restarts;
-- package installation;
+- persistent JavaScript lexical state across host restarts;
 - arbitrary imports;
-- direct network access;
-- direct filesystem access;
-- direct subprocess access;
-- environment access;
-- GPT model-name activation rules;
-- Codex Responses Lite transport in the first release;
+- ambient network, filesystem, subprocess, module, or environment APIs in V8;
+- model-name activation rules;
 - vendored Codex or `pi-codex-conversion` source;
-- Notebook Mode, voice, web, image generation, or compaction replacement;
-- a compatibility mode for the old runtime;
+- a read-only compatibility mode, mixed built-in mode, or parallel API version;
 - private Pi API integration;
 - automatic wrapping of arbitrary third-party Pi tools;
 - a custom terminal UI;
@@ -2620,6 +2797,6 @@ The first production release will not include:
 
 The target implementation is:
 
-> A self-contained TypeScript Pi extension and Factory harness with an OpenAI-shaped model surface and a versioned Rust `deno_core` host process. Compatible OpenAI Responses providers receive raw-source `exec` and structured `wait`; production activation uses provider capabilities rather than model names. Each program runs in a fresh, capability-free V8 isolate. Nested tools execute only in the TypeScript parent through a frozen broker. Yielded cells remain live and are observed through `wait`. The runtime uses strict process, isolate, tool, output, and lifecycle limits. The current QuickJS implementation is removed without a compatibility path.
+> A self-contained TypeScript Pi extension and Factory harness with an OpenAI-shaped provider surface, a versioned Rust `deno_core` host, one parent-side tool broker, and one shared workspace and process sandbox. Compatible providers receive raw-source `exec` and structured `wait`; activation uses provider capabilities rather than model names. Each session selects Codex mode or Pi mode, records that choice, and exposes only that mode's built-in tools at the root of `tools`. Pi mode mirrors the active vanilla Pi built-ins and defaults to `read`, `bash`, `edit`, and `write`. Each program runs in a fresh capability-free V8 isolate. Project and third-party tools can register for one or both modes. Equivalent work in both modes uses the same parent-owned executors while preserving each public tool contract. Yielded cells remain live and are observed through `wait`. Workspace writes, private scratch files, patches, and commands are allowed inside the sandbox. Credentials and ambient host APIs remain unavailable. The read-only tool set is removed without a compatibility path.
 
-This design accepts the cost of Rust and V8 in exchange for JavaScript compatibility, a mature asynchronous host bridge, clean process isolation, and a runtime that does not depend on Codex, `pi-codex-conversion`, or another agent harness.
+This design accepts the cost of Rust, V8, and a separate command sandbox in exchange for JavaScript compatibility, exact Codex behavior, Pi integration, visible side effects, and clean isolation. The runtime remains independent of Codex, `pi-codex-conversion`, and other agent harnesses.

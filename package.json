@@ -1,6 +1,6 @@
 {
   "name": "pi-code-mode",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Run OpenAI-shaped Code Mode in Pi through an isolated V8 host.",
   "type": "module",
   "license": "MIT",
