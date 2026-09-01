@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -81,6 +82,37 @@ describe("writable workspace sandbox", () => {
 
     workspace.close();
     expect(() => workspace.resolve("closed.txt")).toThrow("workspace sandbox is closed");
+  });
+
+  it("keeps writes inside stable directory descriptors during a symlink race", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "pi-code-mode-outside-"));
+    const racer = new SandboxedProcessManager(workspace, { wallTimeLimitMs: 10_000 });
+    mkdirSync(join(root, "race"));
+    try {
+      const running = await racer.exec({
+        cmd: `while :; do
+  rm -rf race
+  ln -s '${outside}' race
+  rm -f race
+  mkdir race
+done`,
+        yield_time_ms: 250,
+      });
+      expect(running.session_id).toBeTypeOf("number");
+
+      for (let index = 0; index < 200; index += 1) {
+        try {
+          await workspace.writeFile("race/escaped.txt", String(index));
+        } catch {
+          // A concurrent path replacement must fail rather than escape the workspace.
+        }
+      }
+      expect(existsSync(join(outside, "escaped.txt"))).toBe(false);
+    } finally {
+      racer.close();
+      await new Promise((resolve) => setTimeout(resolve, 2_300));
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it("applies multi-file Codex patches and rolls back a failed patch", async () => {

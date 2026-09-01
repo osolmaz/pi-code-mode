@@ -80,6 +80,9 @@ pub fn apply_command_sandbox(workspace: &str, scratch: &str) -> anyhow::Result<(
     ]
     .into_iter()
     .filter(|path| std::path::Path::new(path).exists());
+    // Landlock's read set includes EXECUTE, READ_FILE, and READ_DIR.
+    // This lets the worker start allowlisted binaries without granting filesystem writes.
+    let command_read_access = AccessFs::from_read(abi);
     let write_paths = [
         workspace,
         scratch,
@@ -97,7 +100,7 @@ pub fn apply_command_sandbox(workspace: &str, scratch: &str) -> anyhow::Result<(
         .context("failed to select command network rights")?
         .create()
         .context("failed to create the command ruleset")?
-        .add_rules(path_beneath_rules(read_paths, AccessFs::from_read(abi)))
+        .add_rules(path_beneath_rules(read_paths, command_read_access))
         .context("failed to add command read rules")?
         .add_rules(path_beneath_rules(write_paths, AccessFs::from_all(abi)))
         .context("failed to add command write rules")?

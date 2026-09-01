@@ -372,6 +372,8 @@ Path handling must reject:
 - credential paths outside the workspace;
 - races that replace a validated path before mutation.
 
+The broker opens the workspace and scratch roots once and keeps stable directory descriptors. It walks each parent component relative to those descriptors with `O_DIRECTORY` and `O_NOFOLLOW`. Reads, writes, directory creation, removal, and moves then operate through `/proc/self/fd`. A command cannot redirect a broker operation outside the sandbox by replacing a validated parent with a symlink.
+
 Writes use atomic replacement where the operation permits it. Pi's file mutation queue serializes changes to the same file. Results report changed paths.
 
 The production Code Mode tool sets are writable. Read-only behavior is not retained as a legacy mode.
