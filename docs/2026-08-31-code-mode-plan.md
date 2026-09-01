@@ -370,7 +370,8 @@ Path handling must reject:
 - symlink and junction escapes;
 - magic links and device paths;
 - credential paths outside the workspace;
-- races that replace a validated path before mutation.
+- races that replace a validated path before mutation;
+- parent-process reads above 16 MiB before allocating their contents.
 
 The broker opens the workspace and scratch roots once and keeps stable directory descriptors. It walks each parent component relative to those descriptors with `O_DIRECTORY` and `O_NOFOLLOW`. Reads, writes, directory creation, removal, and moves then operate through `/proc/self/fd`. A command cannot redirect a broker operation outside the sandbox by replacing a validated parent with a symlink.
 
@@ -484,6 +485,8 @@ Limits apply at four levels.
 The parent sends each worker's trusted workspace, scratch, working-directory, and limit configuration as one newline-terminated JSON record over the worker's private standard-input pipe. The worker consumes that record before the command inherits the remaining pipe. Command-writable files never carry sandbox authority.
 
 Pi Bash keeps Pi's 2,000-line and 50 KiB display limits. Its bounded streaming collector discards earlier output in memory when those limits are exceeded. It does not use Pi's normal operating-system temporary output file because that file would be outside session scratch.
+
+Optional Pi grep runs the system `rg` binary in a restricted command worker with bounded captured output. Generated regular expressions therefore use ripgrep's linear-time engine outside the parent Node.js event loop. Optional PowerShell uses the same worker and invokes `pwsh` when it is installed.
 
 The manager keeps the escalation timer referenced and targets the process group even if the original worker exits first. This prevents a detached descendant that ignores `SIGTERM` from surviving Pi shutdown.
 

@@ -134,6 +134,20 @@ describe("Pi extension", () => {
     ]);
   });
 
+  it("snapshots the current vanilla Pi tools for each new session", async () => {
+    const extension = loadExtension({ mode: "pi" });
+    await extension.start();
+    await extension.events.get("session_shutdown")({}, extension.context());
+
+    extension.api.setActiveTools(["read", "grep"]);
+    await extension.start({ sessionManager: { getBranch: () => [] } });
+
+    expect(extension.entries.at(-1).data).toMatchObject({
+      mode: "pi",
+      piBuiltins: ["read", "grep"],
+    });
+  });
+
   it("rejects providers that do not advertise OpenAI grammar tools", async () => {
     const extension = loadExtension();
     await extension.start();

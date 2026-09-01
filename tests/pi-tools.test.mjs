@@ -89,6 +89,7 @@ describe("Pi mode built-ins", () => {
     writeFileSync(join(root, "src", "two.ts"), "const value = 'alpha';\n");
     writeFileSync(join(root, "node_modules", "ignored.ts"), "alpha\n");
     writeFileSync(join(root, "binary.bin"), Buffer.from([0, 1, 2]));
+    writeFileSync(join(root, "long.txt"), `${"a".repeat(100_000)}!\n`);
     const broker = new CodeModeBroker(
       root,
       createPiTools(["grep", "find", "ls", "powershell"], workspace, processes),
@@ -127,6 +128,13 @@ describe("Pi mode built-ins", () => {
     expect(text(contextGrep)).toContain("one.txt-1- alpha");
     expect(text(contextGrep)).toContain("one.txt:2: beta");
 
+    const linearRegex = await broker.invoke(
+      "pi.grep",
+      { path: "long.txt", pattern: "(a+)+$", limit: 10 },
+      context(),
+    );
+    expect(text(linearRegex)).toBe("");
+
     const find = await broker.invoke(
       "pi.find",
       { path: ".", pattern: "*.txt", limit: 10 },
@@ -146,6 +154,6 @@ describe("Pi mode built-ins", () => {
 
     await expect(
       broker.invoke("pi.powershell", { command: "Write-Output test" }, context()),
-    ).rejects.toThrow("PowerShell is not available");
+    ).rejects.toThrow("PowerShell is not installed");
   });
 });

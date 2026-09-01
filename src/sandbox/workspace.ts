@@ -52,6 +52,7 @@ const SENSITIVE_NAMES = new Set([
 ]);
 const SENSITIVE_PREFIXES = [".env.", "id_dsa", "id_ed25519", "id_ecdsa", "id_rsa"];
 const MAX_PATH_BYTES = 16 * 1024;
+const DEFAULT_MAX_READ_BYTES = 16 * 1024 * 1024;
 const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 
 export type ResolvedSandboxPath = {
@@ -179,7 +180,10 @@ export class WorkspaceSandbox {
     };
   }
 
-  readFile(path: string): Buffer {
+  readFile(path: string, maxBytes = DEFAULT_MAX_READ_BYTES): Buffer {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > DEFAULT_MAX_READ_BYTES) {
+      throw new Error(`maxBytes must be an integer from 1 to ${String(DEFAULT_MAX_READ_BYTES)}`);
+    }
     const target = this.resolve(path);
     return this.#withParent(target, false, (parentFd, name) => {
       const fd = openSync(
@@ -187,7 +191,11 @@ export class WorkspaceSandbox {
         constants.O_RDONLY | constants.O_NOFOLLOW,
       );
       try {
-        if (!fstatSync(fd).isFile()) throw new Error("path must be a file");
+        const stats = fstatSync(fd);
+        if (!stats.isFile()) throw new Error("path must be a file");
+        if (stats.size > maxBytes) {
+          throw new Error(`file exceeds the ${String(maxBytes)}-byte Code Mode read limit`);
+        }
         return readFileSync(fd);
       } finally {
         closeSync(fd);

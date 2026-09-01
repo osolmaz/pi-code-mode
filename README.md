@@ -175,7 +175,7 @@ Nested commands run in separate restricted workers. They have:
 - a 30-minute wall-clock limit for each command by default;
 - process-group cleanup with `SIGKILL` escalation two seconds after cancellation or session shutdown.
 
-The file tools map `/tmp` to private session scratch space. Sandboxed commands receive the same directory through `TMPDIR`. File operations walk from stable workspace or scratch directory descriptors with no-follow checks, so a running command cannot redirect a broker write through a symlink race.
+The file tools map `/tmp` to private session scratch space. Sandboxed commands receive the same directory through `TMPDIR`. File operations walk from stable workspace or scratch directory descriptors with no-follow checks, so a running command cannot redirect a broker write through a symlink race. Parent-process file reads reject files larger than 16 MiB before allocation. Optional Pi grep runs the existing `rg` binary inside the command sandbox, so generated regular expressions do not run in Pi's Node.js process.
 
 Commands fail closed when the workspace contains a common credential path such as `.env`, `.ssh`, `.aws`, `.npmrc`, or a token or credentials file. Remove that path from the test workspace before you let an untrusted model run commands.
 
