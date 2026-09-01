@@ -210,8 +210,8 @@ pub struct ExecutionOptions {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDefinition {
-    pub name: String,
-    pub code_mode_name: String,
+    pub id: String,
+    pub sdk_path: Vec<String>,
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<String>,

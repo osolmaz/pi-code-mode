@@ -82,8 +82,8 @@ export function executionOptions(
 
 export function wireTools(descriptors: readonly CodeModeToolDescriptor[]): unknown[] {
   return descriptors.map((descriptor) => ({
-    name: descriptor.name,
-    codeModeName: descriptor.codeModeName,
+    id: descriptor.id,
+    sdkPath: descriptor.sdkPath,
     description: descriptor.description,
     ...(descriptor.usage === undefined ? {} : { usage: descriptor.usage }),
     kind: descriptor.kind,

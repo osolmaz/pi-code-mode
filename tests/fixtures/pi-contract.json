@@ -1,0 +1,42 @@
+{
+  "source": {
+    "package": "@earendil-works/pi-coding-agent",
+    "version": "0.84.4"
+  },
+  "allBuiltins": ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"],
+  "defaultBuiltins": ["read", "bash", "edit", "write"],
+  "defaultTools": [
+    {
+      "id": "pi.read",
+      "sdkPath": ["read"],
+      "kind": "function",
+      "effect": "read",
+      "required": ["path"],
+      "properties": ["limit", "offset", "path"]
+    },
+    {
+      "id": "pi.bash",
+      "sdkPath": ["bash"],
+      "kind": "function",
+      "effect": "execute",
+      "required": ["command"],
+      "properties": ["command", "timeout"]
+    },
+    {
+      "id": "pi.edit",
+      "sdkPath": ["edit"],
+      "kind": "function",
+      "effect": "write",
+      "required": ["edits", "path"],
+      "properties": ["edits", "path"]
+    },
+    {
+      "id": "pi.write",
+      "sdkPath": ["write"],
+      "kind": "function",
+      "effect": "write",
+      "required": ["content", "path"],
+      "properties": ["content", "path"]
+    }
+  ]
+}

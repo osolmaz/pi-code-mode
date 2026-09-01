@@ -441,7 +441,8 @@ fn runtime_tools(tools: &[ToolDefinition]) -> Result<Vec<RuntimeTool>, ProtocolE
     Ok(tools
         .iter()
         .map(|tool| RuntimeTool {
-            name: tool.code_mode_name.clone(),
+            id: tool.id.clone(),
+            sdk_path: tool.sdk_path.clone(),
             description: tool.description.clone(),
             deferred: tool.deferred,
         })

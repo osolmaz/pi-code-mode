@@ -76,8 +76,9 @@ export function createReadOnlyCatalog(
   return Object.freeze(
     TOOL_DETAILS.map(({ name, description, usage, inputSchema }) =>
       Object.freeze({
-        name,
-        codeModeName: name,
+        id: `readonly.${name}`,
+        sdkPath: [name],
+        modes: ["codex", "pi"] as const,
         description,
         usage,
         kind: "function" as const,

@@ -11,14 +11,17 @@ import {
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 
+import { parseCodeModeMode, type CodeModeMode } from "../core/mode.js";
+
 const MAX_CONFIG_BYTES = 16 * 1024;
-const CONFIG_KEYS = new Set(["provider", "model", "apiKeyEnv"]);
+const CONFIG_KEYS = new Set(["provider", "model", "apiKeyEnv", "mode"]);
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 
 export type CodeModeConfig = {
-  provider: string;
-  model: string;
+  provider?: string;
+  model?: string;
   apiKeyEnv?: string;
+  mode?: CodeModeMode;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -32,24 +35,32 @@ function requiredString(value: unknown, field: string): string {
   return value.trim();
 }
 
+// Each optional config field has its own validation rule.
+// eslint-disable-next-line complexity
 export function parseCodeModeConfig(value: unknown): CodeModeConfig {
   if (!isRecord(value)) throw new Error("config must be a JSON object");
   for (const key of Object.keys(value)) {
     if (!CONFIG_KEYS.has(key)) throw new Error(`unknown config field: ${key}`);
   }
 
-  const provider = requiredString(value["provider"], "provider");
-  const model = requiredString(value["model"], "model");
+  const providerValue = value["provider"];
+  const modelValue = value["model"];
   const apiKeyEnvValue = value["apiKeyEnv"];
+  const modeValue = value["mode"];
+  const provider =
+    providerValue === undefined ? undefined : requiredString(providerValue, "provider");
+  const model = modelValue === undefined ? undefined : requiredString(modelValue, "model");
   const apiKeyEnv =
     apiKeyEnvValue === undefined ? undefined : requiredString(apiKeyEnvValue, "apiKeyEnv");
   if (apiKeyEnv !== undefined && !ENVIRONMENT_NAME.test(apiKeyEnv)) {
     throw new Error("apiKeyEnv must be an environment-variable name");
   }
+  const mode = modeValue === undefined ? undefined : parseCodeModeMode(modeValue);
   return {
-    provider,
-    model,
+    ...(provider === undefined ? {} : { provider }),
+    ...(model === undefined ? {} : { model }),
     ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
+    ...(mode === undefined ? {} : { mode }),
   };
 }
 

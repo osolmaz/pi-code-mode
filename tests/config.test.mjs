@@ -6,9 +6,12 @@ import { mkdtempSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  createSessionContract,
   getCodeModeConfigPath,
   loadCodeModeConfig,
+  normalizePiBuiltins,
   parseCodeModeConfig,
+  parseSessionContract,
   saveCodeModeConfig,
 } from "../src/index.ts";
 
@@ -64,11 +67,13 @@ describe("Code Mode user config", () => {
     expect(loadCodeModeConfig(configPath)).toBeUndefined();
   });
 
-  it("normalizes strings and keeps the API-key variable optional", () => {
-    expect(parseCodeModeConfig({ provider: " openai ", model: " gpt-5.4 " })).toEqual({
+  it("normalizes strings and supports a mode-only extension config", () => {
+    expect(parseCodeModeConfig({ provider: " openai ", model: " gpt-5.4 ", mode: "pi" })).toEqual({
       provider: "openai",
       model: "gpt-5.4",
+      mode: "pi",
     });
+    expect(parseCodeModeConfig({ mode: "codex" })).toEqual({ mode: "codex" });
   });
 
   it("rejects unknown, secret, and malformed fields", () => {
@@ -93,6 +98,30 @@ describe("Code Mode user config", () => {
     expect(() => parseCodeModeConfig({ provider: "", model: "gpt-5.4" })).toThrow(
       "provider must be a non-empty string",
     );
+    expect(() => parseCodeModeConfig({ mode: "hybrid" })).toThrow("mode must be codex or pi");
+  });
+
+  it("normalizes and validates persisted session contracts", () => {
+    expect(normalizePiBuiltins(["write", "read", "write", "custom"])).toEqual(["read", "write"]);
+    expect(createSessionContract("codex", ["read"])).toEqual({
+      mode: "codex",
+      piBuiltins: [],
+      contractVersion: 1,
+    });
+    expect(
+      parseSessionContract({ mode: "pi", piBuiltins: ["write", "read"], contractVersion: 1 }),
+    ).toEqual({ mode: "pi", piBuiltins: ["read", "write"], contractVersion: 1 });
+    for (const value of [
+      null,
+      [],
+      {},
+      { mode: "pi", piBuiltins: [], contractVersion: 2 },
+      { mode: "other", piBuiltins: [], contractVersion: 1 },
+      { mode: "pi", piBuiltins: "read", contractVersion: 1 },
+      { mode: "pi", piBuiltins: [7], contractVersion: 1 },
+    ]) {
+      expect(parseSessionContract(value)).toBeUndefined();
+    }
   });
 
   it("accepts the exact size limit and rejects invalid or oversized files", () => {

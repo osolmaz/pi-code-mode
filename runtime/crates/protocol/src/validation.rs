@@ -20,16 +20,37 @@ pub fn validate_exec(params: &CellExecParams) -> Result<(), ProtocolError> {
             "program source exceeds the configured limit",
         ));
     }
-    let mut names = HashSet::new();
+    let mut ids = HashSet::new();
+    let mut paths: HashSet<String> = HashSet::new();
     for tool in &params.tools {
-        validate_id(&tool.name, "tool name")?;
-        validate_id(&tool.code_mode_name, "Code Mode tool name")?;
-        if !names.insert(tool.code_mode_name.as_str()) {
+        validate_id(&tool.id, "tool id")?;
+        if !ids.insert(tool.id.as_str()) {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidInput,
-                "Code Mode tool names must be unique",
+                "Code Mode tool ids must be unique",
             ));
         }
+        if tool.sdk_path.is_empty() {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidInput,
+                "Code Mode tool paths must not be empty",
+            ));
+        }
+        for segment in &tool.sdk_path {
+            validate_path_segment(segment)?;
+        }
+        let path = tool.sdk_path.join(".");
+        if paths.iter().any(|existing| {
+            existing == &path
+                || existing.starts_with(&format!("{path}."))
+                || path.starts_with(&format!("{existing}."))
+        }) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidInput,
+                "Code Mode tool paths must not collide",
+            ));
+        }
+        paths.insert(path);
     }
     Ok(())
 }
@@ -41,6 +62,23 @@ pub fn validate_wait(params: &CellWaitParams) -> Result<(), ProtocolError> {
         return Err(ProtocolError::new(
             ErrorCode::InvalidInput,
             "maxOutputBytes must be positive",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_path_segment(value: &str) -> Result<(), ProtocolError> {
+    let mut chars = value.chars();
+    let first = chars.next();
+    let valid = matches!(first, Some('_' | '$' | 'a'..='z' | 'A'..='Z'))
+        && chars.all(|character| {
+            character == '_' || character == '$' || character.is_ascii_alphanumeric()
+        })
+        && !matches!(value, "__proto__" | "constructor" | "prototype");
+    if !valid {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidInput,
+            "Code Mode tool path segment is invalid",
         ));
     }
     Ok(())

@@ -3,6 +3,7 @@
 import { resolve } from "node:path";
 import { stderr, stdin, stdout } from "node:process";
 
+import { DEFAULT_CODE_MODE_MODE, parseCodeModeMode, type CodeModeMode } from "../core/mode.js";
 import {
   getCodeModeConfigPath,
   loadCodeModeConfig,
@@ -11,8 +12,14 @@ import {
 } from "./config.js";
 import { runCodeModeInteractive } from "./index.js";
 
+type EffectiveCodeModeConfig = CodeModeConfig & {
+  provider: string;
+  model: string;
+  mode: CodeModeMode;
+};
+
 type CliArguments = {
-  config: CodeModeConfig;
+  config: EffectiveCodeModeConfig;
   configPath: string;
   cwd: string;
   prompt?: string;
@@ -28,9 +35,10 @@ A prompt argument becomes the initial message.
 Options:
   --provider <provider>    Override the configured Pi provider
   --model <model>          Override the configured model
+  --mode <codex|pi>        Select the Code Mode tool contract (default: codex)
   --api-key-env <name>     Read the provider credential from this environment variable
-  --cwd <directory>        Set the initial read-only sandbox root (default: current directory)
-  --save-config            Save the effective provider, model, and API-key variable name
+  --cwd <directory>        Set the writable sandbox workspace (default: current directory)
+  --save-config            Save the effective provider, model, mode, and API-key variable name
   -h, --help               Show this help
 
 The user config is stored under the XDG config directory. It never stores an API key. CLI options override saved values. Use Pi's standard controls to work with or leave the session.`;
@@ -45,6 +53,7 @@ type CliState = {
   provider?: string;
   model?: string;
   apiKeyEnv?: string;
+  mode?: CodeModeMode;
   cwd: string;
   promptParts: string[];
   saveConfig: boolean;
@@ -66,6 +75,12 @@ const OPTION_SPECS: Record<string, OptionSpec> = {
     consumed: 2,
     apply: (state, args, index) => {
       state.model = takeValue(args, index, "--model");
+    },
+  },
+  "--mode": {
+    consumed: 2,
+    apply: (state, args, index) => {
+      state.mode = parseCodeModeMode(takeValue(args, index, "--mode"), "--mode");
     },
   },
   "--cwd": {
@@ -115,15 +130,18 @@ function requiredConfigValue(
   return selected;
 }
 
+// Standalone settings combine independent CLI, saved, and default sources.
+// eslint-disable-next-line complexity
 function effectiveConfig(
   state: CliState,
   saved: CodeModeConfig | undefined,
   configPath: string,
-): CodeModeConfig {
+): EffectiveCodeModeConfig {
   const provider = requiredConfigValue(state.provider, saved?.provider, "--provider", configPath);
   const model = requiredConfigValue(state.model, saved?.model, "--model", configPath);
   const apiKeyEnv = state.apiKeyEnv ?? saved?.apiKeyEnv;
-  return { provider, model, ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }) };
+  const mode = state.mode ?? saved?.mode ?? DEFAULT_CODE_MODE_MODE;
+  return { provider, model, mode, ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }) };
 }
 
 function finalizeArguments(state: CliState): CliArguments {
@@ -182,6 +200,7 @@ async function main(): Promise<void> {
   await runCodeModeInteractive({
     provider: args.config.provider,
     model: args.config.model,
+    mode: args.config.mode,
     cwd: args.cwd,
     ...(args.apiKey === undefined ? {} : { apiKey: args.apiKey }),
     ...(args.prompt === undefined ? {} : { initialMessage: args.prompt }),

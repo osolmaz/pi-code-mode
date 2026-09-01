@@ -1,0 +1,45 @@
+{
+  "source": {
+    "repository": "https://github.com/openai/codex",
+    "revision": "2b7c279735d0d096cf7b34fe98938f46792f4d4f",
+    "files": [
+      "codex-rs/core/src/tools/handlers/shell_spec.rs",
+      "codex-rs/core/src/tools/handlers/apply_patch_spec.rs",
+      "codex-rs/core/assets/tools/apply_patch.lark"
+    ]
+  },
+  "tools": [
+    {
+      "id": "codex.exec_command",
+      "sdkPath": ["exec_command"],
+      "kind": "function",
+      "effect": "execute",
+      "required": ["cmd"],
+      "properties": [
+        "cmd",
+        "login",
+        "max_output_tokens",
+        "shell",
+        "tty",
+        "workdir",
+        "yield_time_ms"
+      ],
+      "outputRequired": ["output", "wall_time_seconds"]
+    },
+    {
+      "id": "codex.write_stdin",
+      "sdkPath": ["write_stdin"],
+      "kind": "function",
+      "effect": "interactive",
+      "required": ["session_id"],
+      "properties": ["chars", "max_output_tokens", "session_id", "yield_time_ms"],
+      "outputRequired": ["output", "wall_time_seconds"]
+    },
+    {
+      "id": "codex.apply_patch",
+      "sdkPath": ["apply_patch"],
+      "kind": "freeform",
+      "effect": "write"
+    }
+  ]
+}
