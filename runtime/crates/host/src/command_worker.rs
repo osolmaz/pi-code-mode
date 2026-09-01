@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::process::Command;
 
 use anyhow::{Context, bail};
@@ -5,7 +6,7 @@ use serde::Deserialize;
 
 use crate::sandbox;
 
-const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+const MAX_CONFIG_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -23,11 +24,7 @@ struct CommandConfig {
 }
 
 pub fn run() -> anyhow::Result<()> {
-    let path = std::env::args()
-        .nth(2)
-        .context("missing command-worker configuration path")?;
-    let config = read_config(&path)?;
-    std::fs::remove_file(&path).context("failed to remove command-worker configuration")?;
+    let config = read_config()?;
     validate_config(&config)?;
     sandbox::apply_command_sandbox(&config.workspace, &config.scratch)?;
 
@@ -61,12 +58,24 @@ pub fn run() -> anyhow::Result<()> {
     std::process::exit(status.code().unwrap_or(128));
 }
 
-fn read_config(path: &str) -> anyhow::Result<CommandConfig> {
-    let metadata = std::fs::metadata(path).context("invalid command-worker configuration")?;
-    if metadata.len() > MAX_CONFIG_BYTES {
-        bail!("command-worker configuration is too large");
+fn read_config() -> anyhow::Result<CommandConfig> {
+    let stdin = std::io::stdin();
+    let mut bytes = Vec::new();
+    let mut terminated = false;
+    for byte in stdin.lock().bytes() {
+        let byte = byte.context("failed to read command-worker configuration")?;
+        if byte == b'\n' {
+            terminated = true;
+            break;
+        }
+        if bytes.len() >= MAX_CONFIG_BYTES {
+            bail!("command-worker configuration is too large");
+        }
+        bytes.push(byte);
     }
-    let bytes = std::fs::read(path).context("failed to read command-worker configuration")?;
+    if !terminated {
+        bail!("command-worker configuration is not newline terminated");
+    }
     serde_json::from_slice(&bytes).context("invalid command-worker configuration")
 }
 

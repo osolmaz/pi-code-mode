@@ -299,6 +299,30 @@ PY`,
     }
   });
 
+  it("bounds completed command records that are never polled", async () => {
+    const sessionIds = [];
+    for (const count of [8, 8, 1]) {
+      const batch = await Promise.all(
+        Array.from({ length: count }, () =>
+          processes.exec({ cmd: "sleep 0.4", yield_time_ms: 250 }),
+        ),
+      );
+      sessionIds.push(...batch.map((result) => result.session_id));
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+
+    expect(sessionIds).toHaveLength(17);
+    await expect(
+      processes.write({ session_id: sessionIds[0], chars: "", yield_time_ms: 250 }),
+    ).rejects.toThrow("unknown command session");
+    const retained = await processes.write({
+      session_id: sessionIds.at(-1),
+      chars: "",
+      yield_time_ms: 250,
+    });
+    expect(retained.exit_code).toBe(0);
+  });
+
   it("escalates shutdown to kill a command tree that ignores SIGTERM", async () => {
     const guarded = new SandboxedProcessManager(workspace, { wallTimeLimitMs: 10_000 });
     let commandPid;

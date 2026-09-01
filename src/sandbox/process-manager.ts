@@ -1,7 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
 import type { Writable } from "node:stream";
 
 import { resolveHostBinary } from "../host/binary.js";
@@ -20,6 +18,9 @@ const DEFAULT_WALL_TIME_LIMIT_MS = 30 * 60 * 1_000;
 const MAX_WALL_TIME_LIMIT_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_MAX_ACTIVE_PROCESSES = 8;
 const MAX_ACTIVE_PROCESSES = 64;
+const COMPLETED_PROCESS_RETENTION_MS = 60_000;
+const MAX_COMPLETED_PROCESSES = 16;
+const MAX_COMPLETED_OUTPUT_BYTES = 32 * 1024 * 1024;
 
 export type ExecCommandInput = {
   cmd: string;
@@ -58,6 +59,7 @@ type ManagedProcess = {
   closed: boolean;
   lifetimeTimer?: NodeJS.Timeout;
   terminationTimer?: NodeJS.Timeout;
+  evictionTimer?: NodeJS.Timeout;
 };
 
 export type SandboxedProcessManagerOptions = {
@@ -285,7 +287,10 @@ export class SandboxedProcessManager {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    for (const process of this.#processes.values()) this.#terminate(process);
+    for (const process of this.#processes.values()) {
+      if (process.evictionTimer !== undefined) clearTimeout(process.evictionTimer);
+      this.#terminate(process);
+    }
     this.#processes.clear();
   }
 
@@ -299,24 +304,19 @@ export class SandboxedProcessManager {
       );
     }
     const id = this.#nextId++;
-    const configPath = join(this.#workspace.scratch, `.command-${randomUUID()}.json`);
-    writeFileSync(
-      configPath,
-      JSON.stringify({
-        command,
-        cwd,
-        workspace: this.#workspace.root,
-        scratch: this.#workspace.scratch,
-        tty,
-        cpuLimitSeconds: this.#options.cpuLimitSeconds,
-        memoryLimitBytes: this.#options.memoryLimitBytes,
-        fileSizeLimitBytes: this.#options.fileSizeLimitBytes,
-        openFileLimit: this.#options.openFileLimit,
-        processLimit: this.#options.processLimit,
-      }),
-      { mode: 0o600, flag: "wx" },
-    );
-    const child = spawn(this.#options.hostBinary, ["--command-worker", configPath], {
+    const config = JSON.stringify({
+      command,
+      cwd,
+      workspace: this.#workspace.root,
+      scratch: this.#workspace.scratch,
+      tty,
+      cpuLimitSeconds: this.#options.cpuLimitSeconds,
+      memoryLimitBytes: this.#options.memoryLimitBytes,
+      fileSizeLimitBytes: this.#options.fileSizeLimitBytes,
+      openFileLimit: this.#options.openFileLimit,
+      processLimit: this.#options.processLimit,
+    });
+    const child = spawn(this.#options.hostBinary, ["--command-worker"], {
       cwd: "/",
       env: {},
       detached: true,
@@ -348,7 +348,13 @@ export class SandboxedProcessManager {
       managed.closed = true;
       managed.exitCode = code ?? (signal === null ? 1 : 128);
       if (managed.lifetimeTimer !== undefined) clearTimeout(managed.lifetimeTimer);
-      rmSync(configPath, { force: true });
+      this.#retainCompleted(managed);
+    });
+    child.stdin.write(`${config}\n`, (error) => {
+      if (error !== null && error !== undefined) {
+        this.#append(managed, Buffer.from(`command configuration failed: ${error.message}\n`));
+        this.#terminate(managed);
+      }
     });
     return managed;
   }
@@ -390,8 +396,39 @@ export class SandboxedProcessManager {
       ...(process.closed ? { exit_code: process.exitCode ?? 1 } : { session_id: process.id }),
       ...(originalTokenCount === undefined ? {} : { original_token_count: originalTokenCount }),
     };
-    if (process.closed) this.#processes.delete(process.id);
+    if (process.closed) this.#remove(process.id);
     return result;
+  }
+
+  #retainCompleted(process: ManagedProcess): void {
+    if (this.#processes.get(process.id) !== process) return;
+    process.evictionTimer = setTimeout(() => {
+      this.#remove(process.id);
+    }, COMPLETED_PROCESS_RETENTION_MS);
+    process.evictionTimer.unref();
+
+    const completed = [...this.#processes.values()]
+      .filter((candidate) => candidate.closed)
+      .sort((left, right) => left.startedAt - right.startedAt);
+    let retainedBytes = completed.reduce(
+      (total, candidate) => total + Buffer.byteLength(candidate.output),
+      0,
+    );
+    while (
+      completed.length > MAX_COMPLETED_PROCESSES ||
+      retainedBytes > MAX_COMPLETED_OUTPUT_BYTES
+    ) {
+      const oldest = completed.shift();
+      if (oldest === undefined) break;
+      retainedBytes -= Buffer.byteLength(oldest.output);
+      this.#remove(oldest.id);
+    }
+  }
+
+  #remove(id: number): void {
+    const process = this.#processes.get(id);
+    if (process?.evictionTimer !== undefined) clearTimeout(process.evictionTimer);
+    this.#processes.delete(id);
   }
 
   #terminate(process: ManagedProcess): void {

@@ -223,9 +223,13 @@ function sessionContract(context: ExtensionContext): CodeModeSessionContract | u
   return undefined;
 }
 
-function activePiBuiltins(pi: ExtensionAPI, options: CodeModeExtensionOptions): readonly string[] {
+function activePiBuiltins(
+  pi: ExtensionAPI,
+  options: CodeModeExtensionOptions,
+  activeToolNames?: readonly string[],
+): readonly string[] {
   if (options.piBuiltins !== undefined) return normalizePiBuiltins(options.piBuiltins);
-  const active = new Set(pi.getActiveTools());
+  const active = new Set(activeToolNames ?? pi.getActiveTools());
   const all = typeof pi.getAllTools === "function" ? pi.getAllTools() : ([] as ToolInfo[]);
   if (all.length === 0) return DEFAULT_PI_BUILTINS;
   const builtins = all
@@ -459,7 +463,7 @@ function installCodeMode(
         saveDefaultMode(selected, options);
         const next = createSessionContract(
           selected,
-          selected === "pi" ? activePiBuiltins(pi, options) : [],
+          selected === "pi" ? activePiBuiltins(pi, options, baselineTools) : [],
         );
         if (!hasConversation(context)) {
           contract = next;
@@ -499,7 +503,7 @@ function installCodeMode(
       sessionContract(context) ??
       createSessionContract(
         configuredMode(options),
-        configuredMode(options) === "pi" ? activePiBuiltins(pi, options) : [],
+        configuredMode(options) === "pi" ? activePiBuiltins(pi, options, baselineTools) : [],
       );
     if (sessionContract(context) === undefined) pi.appendEntry(CODE_MODE_SESSION_ENTRY, contract);
     await runtime.configure(context.cwd, contract, registrations);
