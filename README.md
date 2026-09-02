@@ -190,6 +190,8 @@ Pi Code Mode records the selected session contract and nested side-effect metada
 
 [Build full Pi Code Mode](docs/2026-08-31-code-mode-plan.md) describes the product contract, security boundary, and upstream Codex and Pi contracts.
 
+[Compare Pi Code Mode and Codex API requests](docs/2026-09-02-codex-api-request-comparison.md) records a same-model request capture and the differences between the two clients.
+
 ## License
 
 [MIT](LICENSE)
