@@ -59,6 +59,14 @@ export class HostClient {
         MAX_STDERR_BYTES,
       ).text;
     });
+    child.stdin.on("error", (error) => {
+      const detail = this.#stderr.trim();
+      this.#fail(
+        new Error(
+          `Code Mode host input failed: ${error.message}${detail.length === 0 ? "" : `: ${detail}`}`,
+        ),
+      );
+    });
     child.once("error", (error) => {
       this.#fail(error);
     });
