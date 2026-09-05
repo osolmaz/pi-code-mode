@@ -185,6 +185,28 @@ node -e 'fetch("http://127.0.0.1:${String(address.port)}").then(async response =
     }
   });
 
+  it("reports shell completion when a background child retains command pipes", async () => {
+    let backgroundPid;
+    try {
+      const result = await processes.exec({
+        cmd: "sleep 999 & printf '%s\\n' \"$!\"",
+        yield_time_ms: 2_000,
+      });
+      expect(result.exit_code).toBe(0);
+      expect(result.wall_time_seconds).toBeLessThan(2);
+      backgroundPid = Number(result.output.trim());
+      expect(() => process.kill(backgroundPid, 0)).not.toThrow();
+
+      const draining = await processes.exec({
+        cmd: "(sleep 0.05; printf late) &",
+        yield_time_ms: 2_000,
+      });
+      expect(draining).toMatchObject({ exit_code: 0, output: "late" });
+    } finally {
+      if (backgroundPid !== undefined) process.kill(backgroundPid, "SIGTERM");
+    }
+  });
+
   it("uses normal temporary directories without a private quota", async () => {
     const temporary = mkdtempSync(join(tmpdir(), "pi-code-mode-command-temp-"));
     try {

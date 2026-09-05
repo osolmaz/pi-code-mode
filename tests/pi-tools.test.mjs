@@ -9,11 +9,20 @@ import { CodeModeBroker, createPiTools } from "../src/index.ts";
 
 let root;
 let nextCall;
+let piContext;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "pi-code-mode-pi-tools-"));
   writeFileSync(join(root, "one.txt"), "alpha\nbeta\n");
   nextCall = 1;
+  piContext = {
+    model: { provider: "test-provider", id: "test-model", input: ["text"] },
+    thinkingLevel: "high",
+    sessionManager: {
+      getSessionId: () => "test-session",
+      getSessionFile: () => join(root, "session.jsonl"),
+    },
+  };
 });
 
 afterEach(() => {
@@ -38,7 +47,7 @@ describe("Pi mode built-ins", () => {
   it("runs the default read, edit, write, and one-shot bash contracts", async () => {
     const broker = new CodeModeBroker(
       root,
-      createPiTools(["read", "edit", "write", "bash"], root),
+      createPiTools(["read", "edit", "write", "bash"], root, piContext),
       { mode: "pi" },
     );
 
@@ -79,7 +88,7 @@ describe("Pi mode built-ins", () => {
         "base64",
       ),
     );
-    const broker = new CodeModeBroker(root, createPiTools(["read"], root), {
+    const broker = new CodeModeBroker(root, createPiTools(["read"], root, piContext), {
       mode: "pi",
     });
 
@@ -96,7 +105,7 @@ describe("Pi mode built-ins", () => {
     writeFileSync(join(root, "long.txt"), `${"a".repeat(100_000)}!\n`);
     const broker = new CodeModeBroker(
       root,
-      createPiTools(["grep", "find", "ls", "powershell"], root),
+      createPiTools(["grep", "find", "ls", "powershell"], root, piContext),
       { mode: "pi" },
     );
 
@@ -201,7 +210,7 @@ describe("Pi mode built-ins", () => {
     const previous = process.env["PI_CODE_MODE_TEST_ENV"];
     process.env["PI_CODE_MODE_TEST_ENV"] = "environment-ok";
     try {
-      const broker = new CodeModeBroker(root, createPiTools(["read", "bash"], root), {
+      const broker = new CodeModeBroker(root, createPiTools(["read", "bash"], root, piContext), {
         mode: "pi",
       });
       const read = await broker.invoke("pi.read", { path: outsideFile }, context());
@@ -210,12 +219,12 @@ describe("Pi mode built-ins", () => {
       const bash = await broker.invoke(
         "pi.bash",
         {
-          command: `printf '%s\\n' "$PI_CODE_MODE_TEST_ENV"; node -e 'fetch("http://127.0.0.1:${String(address.port)}").then(async response => console.log(await response.text()))'`,
+          command: `printf '%s\\n' "$PI_CODE_MODE_TEST_ENV:$PI_SESSION_ID:$PI_PROVIDER:$PI_MODEL:$PI_REASONING_LEVEL"; node -e 'fetch("http://127.0.0.1:${String(address.port)}").then(async response => console.log(await response.text()))'`,
           timeout: 5,
         },
         context(),
       );
-      expect(text(bash)).toContain("environment-ok");
+      expect(text(bash)).toContain("environment-ok:test-session:test-provider:test-model:high");
       expect(text(bash)).toContain("network-ok");
     } finally {
       if (previous === undefined) delete process.env["PI_CODE_MODE_TEST_ENV"];

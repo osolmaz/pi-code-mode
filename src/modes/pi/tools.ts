@@ -8,6 +8,7 @@ import {
   createReadTool,
   createWriteTool,
 } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import type { CodeModeInvocationContext, CodeModeToolDescriptor } from "../../broker/types.js";
 import type { VanillaPiBuiltin } from "../../core/mode.js";
@@ -23,10 +24,15 @@ type PiTool = {
     params: never,
     signal?: AbortSignal,
     onUpdate?: (result: PiToolResult) => void,
+    context?: ExtensionContext,
   ) => Promise<PiToolResult>;
 };
 
-function descriptor(tool: PiTool, effect: "read" | "write" | "execute"): CodeModeToolDescriptor {
+function descriptor(
+  tool: PiTool,
+  effect: "read" | "write" | "execute",
+  extensionContext: ExtensionContext,
+): CodeModeToolDescriptor {
   return Object.freeze({
     id: `pi.${tool.name}`,
     sdkPath: [tool.name],
@@ -38,7 +44,13 @@ function descriptor(tool: PiTool, effect: "read" | "write" | "execute"): CodeMod
     effect,
     replay: effect === "read" ? ("safe" as const) : ("unsafe" as const),
     invoke(input: unknown, context: CodeModeInvocationContext, signal: AbortSignal) {
-      return tool.execute(context.nestedToolCallId, input as never, signal);
+      return tool.execute(
+        context.nestedToolCallId,
+        input as never,
+        signal,
+        undefined,
+        extensionContext,
+      );
     },
   });
 }
@@ -52,6 +64,7 @@ function effect(name: VanillaPiBuiltin): "read" | "write" | "execute" {
 export function createPiTools(
   builtins: readonly VanillaPiBuiltin[],
   cwd: string,
+  extensionContext: ExtensionContext,
 ): readonly CodeModeToolDescriptor[] {
   const tools = new Map<VanillaPiBuiltin, PiTool>([
     ["read", createReadTool(cwd) as PiTool],
@@ -68,7 +81,7 @@ export function createPiTools(
     builtins.map((name) => {
       const tool = tools.get(name);
       if (tool === undefined) throw new Error(`unsupported Pi built-in tool: ${name}`);
-      return descriptor(tool, effect(name));
+      return descriptor(tool, effect(name), extensionContext);
     }),
   );
 }

@@ -89,7 +89,11 @@ function loadExtension(options = {}) {
       select: async () => undefined,
       confirm: async () => false,
     },
-    sessionManager: { getBranch: () => entries },
+    sessionManager: {
+      getBranch: () => entries,
+      getSessionId: () => "extension-test-session",
+      getSessionFile: () => undefined,
+    },
     ...overrides,
   });
   const start = async (overrides = {}) => {
