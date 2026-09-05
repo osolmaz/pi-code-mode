@@ -31,7 +31,7 @@ type PiTool = {
 function descriptor(
   tool: PiTool,
   effect: "read" | "write" | "execute",
-  extensionContext: ExtensionContext,
+  resolveContext: (context: CodeModeInvocationContext) => ExtensionContext,
 ): CodeModeToolDescriptor {
   return Object.freeze({
     id: `pi.${tool.name}`,
@@ -49,7 +49,7 @@ function descriptor(
         input as never,
         signal,
         undefined,
-        extensionContext,
+        resolveContext(context),
       );
     },
   });
@@ -64,7 +64,7 @@ function effect(name: VanillaPiBuiltin): "read" | "write" | "execute" {
 export function createPiTools(
   builtins: readonly VanillaPiBuiltin[],
   cwd: string,
-  extensionContext: ExtensionContext,
+  resolveContext: (context: CodeModeInvocationContext) => ExtensionContext,
 ): readonly CodeModeToolDescriptor[] {
   const tools = new Map<VanillaPiBuiltin, PiTool>([
     ["read", createReadTool(cwd) as PiTool],
@@ -81,7 +81,7 @@ export function createPiTools(
     builtins.map((name) => {
       const tool = tools.get(name);
       if (tool === undefined) throw new Error(`unsupported Pi built-in tool: ${name}`);
-      return descriptor(tool, effect(name), extensionContext);
+      return descriptor(tool, effect(name), resolveContext);
     }),
   );
 }

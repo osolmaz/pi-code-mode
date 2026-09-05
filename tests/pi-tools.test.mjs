@@ -47,7 +47,7 @@ describe("Pi mode built-ins", () => {
   it("runs the default read, edit, write, and one-shot bash contracts", async () => {
     const broker = new CodeModeBroker(
       root,
-      createPiTools(["read", "edit", "write", "bash"], root, piContext),
+      createPiTools(["read", "edit", "write", "bash"], root, () => piContext),
       { mode: "pi" },
     );
 
@@ -88,9 +88,13 @@ describe("Pi mode built-ins", () => {
         "base64",
       ),
     );
-    const broker = new CodeModeBroker(root, createPiTools(["read"], root, piContext), {
-      mode: "pi",
-    });
+    const broker = new CodeModeBroker(
+      root,
+      createPiTools(["read"], root, () => piContext),
+      {
+        mode: "pi",
+      },
+    );
 
     const result = await broker.invoke("pi.read", { path: "pixel.png" }, context());
     expect(text(result)).toContain("Read image file [image/png]");
@@ -105,7 +109,7 @@ describe("Pi mode built-ins", () => {
     writeFileSync(join(root, "long.txt"), `${"a".repeat(100_000)}!\n`);
     const broker = new CodeModeBroker(
       root,
-      createPiTools(["grep", "find", "ls", "powershell"], root, piContext),
+      createPiTools(["grep", "find", "ls", "powershell"], root, () => piContext),
       { mode: "pi" },
     );
 
@@ -210,9 +214,13 @@ describe("Pi mode built-ins", () => {
     const previous = process.env["PI_CODE_MODE_TEST_ENV"];
     process.env["PI_CODE_MODE_TEST_ENV"] = "environment-ok";
     try {
-      const broker = new CodeModeBroker(root, createPiTools(["read", "bash"], root, piContext), {
-        mode: "pi",
-      });
+      const broker = new CodeModeBroker(
+        root,
+        createPiTools(["read", "bash"], root, () => piContext),
+        {
+          mode: "pi",
+        },
+      );
       const read = await broker.invoke("pi.read", { path: outsideFile }, context());
       expect(text(read)).toContain("outside");
 

@@ -58,6 +58,7 @@ export type CodeModeExtensionOptions = {
 class RuntimeOwner {
   readonly #hostProcess: HostProcessOptions | undefined;
   readonly #replayCache = new CodeModeReplayCache();
+  readonly #invocationContexts = new Map<string, ExtensionContext>();
   #hostManager: CodeModeHostManager | undefined;
   #hostSession: CodeModeHostSession | undefined;
   #starting: Promise<CodeModeHostSession> | undefined;
@@ -95,7 +96,9 @@ class RuntimeOwner {
       const builtins =
         contract.mode === "codex"
           ? createCodexTools(workspace, processes)
-          : createPiTools(contract.piBuiltins, context.cwd, context);
+          : createPiTools(contract.piBuiltins, context.cwd, (invocation) =>
+              this.#invocationContext(invocation.parentToolCallId),
+            );
       const descriptors = new CodeModeBroker(workspace.root, [...builtins, ...registrations], {
         mode: contract.mode,
       }).descriptors;
@@ -112,6 +115,8 @@ class RuntimeOwner {
   }
 
   broker(
+    parentToolCallId: string,
+    extensionContext: ExtensionContext,
     trace: (
       descriptor: CodeModeToolDescriptor,
       status: "started" | "completed" | "failed",
@@ -121,6 +126,7 @@ class RuntimeOwner {
     ) => void,
   ): CodeModeBroker {
     const contract = this.contract;
+    this.#invocationContexts.set(parentToolCallId, extensionContext);
     const wrapped = this.#descriptors.map((descriptor) => ({
       ...descriptor,
       async invoke(
@@ -146,6 +152,16 @@ class RuntimeOwner {
     });
   }
 
+  updateInvocationContext(parentToolCallId: string, context: ExtensionContext): void {
+    if (this.#invocationContexts.has(parentToolCallId)) {
+      this.#invocationContexts.set(parentToolCallId, context);
+    }
+  }
+
+  releaseInvocationContext(parentToolCallId: string): void {
+    this.#invocationContexts.delete(parentToolCallId);
+  }
+
   async session(): Promise<CodeModeHostSession> {
     if (this.#hostSession !== undefined) return this.#hostSession;
     this.#starting ??= this.#start();
@@ -168,11 +184,18 @@ class RuntimeOwner {
     this.#workspace = undefined;
     this.#contract = undefined;
     this.#descriptors = [];
+    this.#invocationContexts.clear();
     this.#replayCache.clear();
     processes?.close();
     await session?.close();
     await manager?.close();
     workspace?.close();
+  }
+
+  #invocationContext(parentToolCallId: string): ExtensionContext {
+    const context = this.#invocationContexts.get(parentToolCallId);
+    if (context === undefined) throw new Error("Pi tool invocation context is no longer active");
+    return context;
   }
 
   async #start(): Promise<CodeModeHostSession> {
@@ -298,8 +321,8 @@ function installCodeMode(
   let contract: CodeModeSessionContract | undefined;
   let registrations: CodeModeToolRegistration[] = [];
   let collecting = false;
-  let toolContext: ExtensionContext | undefined;
   const cellTraces = new Map<string, NestedToolTrace[]>();
+  const cellParentCalls = new Map<string, string>();
 
   const eventBus = "events" in pi ? pi.events : undefined;
   eventBus?.on(CODE_MODE_REGISTER_EVENT, (value) => {
@@ -321,6 +344,7 @@ function installCodeMode(
     wallTimeMs?: number,
     input?: unknown,
     callId = "unknown",
+    extensionContext?: ExtensionContext,
     // eslint-disable-next-line complexity -- Trace records conditionally include timing, safe input, and UI state.
   ): NestedToolTrace => {
     const name = `tools.${descriptor.sdkPath.join(".")}`;
@@ -334,8 +358,8 @@ function installCodeMode(
       ...(wallTimeMs === undefined ? {} : { wallTimeMs }),
     };
     pi.appendEntry("pi-code-mode/tool-call", record);
-    if (status === "started" && descriptor.effect !== "read" && toolContext?.hasUI === true) {
-      toolContext.ui.notify(`Code Mode: ${name}`, "info");
+    if (status === "started" && descriptor.effect !== "read" && extensionContext?.hasUI === true) {
+      extensionContext.ui.notify(`Code Mode: ${name}`, "info");
     }
     return record;
   };
@@ -361,25 +385,34 @@ function installCodeMode(
       constrainedSampling: CODE_MODE_EXEC_CONSTRAINED_SAMPLING,
       executionMode: "parallel",
       async execute(toolCallId, params, signal, _onUpdate, context) {
-        toolContext = context;
         const nestedToolTraces: NestedToolTrace[] = [];
-        const broker = runtime.broker((descriptor, status, wallTimeMs, input, callId) => {
-          const record = trace(descriptor, status, wallTimeMs, input, callId);
-          const index = nestedToolTraces.findIndex((item) => item.callId === record.callId);
-          if (index === -1) nestedToolTraces.push(record);
-          else nestedToolTraces[index] = { ...nestedToolTraces[index], ...record };
-        });
+        const broker = runtime.broker(
+          toolCallId,
+          context,
+          (descriptor, status, wallTimeMs, input, callId) => {
+            const record = trace(descriptor, status, wallTimeMs, input, callId, context);
+            const index = nestedToolTraces.findIndex((item) => item.callId === record.callId);
+            if (index === -1) nestedToolTraces.push(record);
+            else nestedToolTraces[index] = { ...nestedToolTraces[index], ...record };
+          },
+        );
         try {
           const result = await (
             await runtime.session()
           ).exec(params.code, toolCallId, broker, limits, signal);
-          if (result.status === "waiting") cellTraces.set(result.cellId, nestedToolTraces);
+          if (result.status === "waiting") {
+            cellTraces.set(result.cellId, nestedToolTraces);
+            cellParentCalls.set(result.cellId, toolCallId);
+          } else {
+            runtime.releaseInvocationContext(toolCallId);
+          }
           return {
             content: [{ type: "text", text: formatResult(result) }],
             details: { ...result, mode: runtime.contract.mode, nestedToolTraces },
           };
         } catch (error) {
           broker.cancel();
+          runtime.releaseInvocationContext(toolCallId);
           const message = error instanceof Error ? error.message : String(error);
           return {
             content: [{ type: "text", text: `Code Mode failed: ${message}` }],
@@ -389,8 +422,6 @@ function installCodeMode(
               nestedToolTraces,
             },
           };
-        } finally {
-          toolContext = undefined;
         }
       },
     });
@@ -419,9 +450,13 @@ function installCodeMode(
       executionMode: "parallel",
       // Waiting handles observation, completion, trace retention, cancellation, and errors.
       // eslint-disable-next-line complexity
-      async execute(_toolCallId, params, signal) {
+      async execute(_toolCallId, params, signal, _onUpdate, context) {
         try {
           signal?.throwIfAborted();
+          const parentToolCallId = cellParentCalls.get(params.cell_id);
+          if (parentToolCallId !== undefined) {
+            runtime.updateInvocationContext(parentToolCallId, context);
+          }
           const result = await (
             await runtime.session()
           ).wait(
@@ -434,7 +469,13 @@ function installCodeMode(
           );
           signal?.throwIfAborted();
           const nestedToolTraces = cellTraces.get(params.cell_id) ?? [];
-          if (result.status !== "waiting") cellTraces.delete(params.cell_id);
+          if (result.status !== "waiting") {
+            cellTraces.delete(params.cell_id);
+            cellParentCalls.delete(params.cell_id);
+            if (parentToolCallId !== undefined) {
+              runtime.releaseInvocationContext(parentToolCallId);
+            }
+          }
           return {
             content: [{ type: "text", text: formatResult(result) }],
             details: { ...result, mode: runtime.contract.mode, nestedToolTraces },
@@ -531,6 +572,7 @@ function installCodeMode(
 
   pi.on("session_shutdown", async () => {
     cellTraces.clear();
+    cellParentCalls.clear();
     await runtime.shutdown();
     if (baselineTools !== undefined) pi.setActiveTools(baselineTools);
     baselineTools = undefined;
