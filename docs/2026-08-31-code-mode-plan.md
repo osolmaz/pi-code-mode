@@ -7,6 +7,8 @@ updated: 2026-09-01
 
 # Build full Pi Code Mode
 
+> The coding-tool permission and sandbox design in this historical plan is superseded by [Remove extra coding-tool restrictions](2026-09-06-native-tool-parity-plan.md). The Deno Core JavaScript host stays isolated. Nested coding tools now use the parent process and native Pi permissions.
+
 Pi Code Mode gives a model one programmatic tool surface for coding work. The provider sees only `exec` and `wait`. JavaScript written inside `exec` receives either Codex tools or Pi tools, as selected for the Pi session.
 
 A session uses one mode from start to finish:

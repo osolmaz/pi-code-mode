@@ -1,6 +1,6 @@
 import { dirname, isAbsolute } from "node:path";
 
-import type { WorkspaceSandbox } from "../../sandbox/workspace.js";
+import type { Workspace } from "../../workspace.js";
 
 const MAX_PATCH_BYTES = 4 * 1024 * 1024;
 
@@ -132,7 +132,7 @@ function replaceHunks(content: string, operation: UpdateOperation): string {
 
 type Snapshot = { path: string; existed: boolean; content?: Buffer; mode?: number };
 
-export async function applyPatch(workspace: WorkspaceSandbox, source: string): Promise<string> {
+export async function applyPatch(workspace: Workspace, source: string): Promise<string> {
   const operations = parseApplyPatch(source);
   // Applying and rolling back every operation is one serialized workspace transaction.
   // eslint-disable-next-line complexity
@@ -145,7 +145,7 @@ export async function applyPatch(workspace: WorkspaceSandbox, source: string): P
     }
     const createdParents = new Set<string>();
     for (const path of paths) {
-      workspace.resolve(path, { write: true });
+      workspace.resolve(path);
       let parent = dirname(path);
       while (parent !== "." && parent !== "/" && !workspace.exists(parent)) {
         createdParents.add(parent);

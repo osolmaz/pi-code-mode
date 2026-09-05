@@ -1,32 +1,22 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import {
-  CodeModeBroker,
-  SandboxedProcessManager,
-  WorkspaceSandbox,
-  createPiTools,
-} from "../src/index.ts";
+import { CodeModeBroker, createPiTools } from "../src/index.ts";
 
 let root;
-let workspace;
-let processes;
 let nextCall;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "pi-code-mode-pi-tools-"));
   writeFileSync(join(root, "one.txt"), "alpha\nbeta\n");
-  workspace = new WorkspaceSandbox(root);
-  processes = new SandboxedProcessManager(workspace);
   nextCall = 1;
 });
 
 afterEach(() => {
-  processes.close();
-  workspace.close();
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -48,7 +38,7 @@ describe("Pi mode built-ins", () => {
   it("runs the default read, edit, write, and one-shot bash contracts", async () => {
     const broker = new CodeModeBroker(
       root,
-      createPiTools(["read", "edit", "write", "bash"], workspace, processes),
+      createPiTools(["read", "edit", "write", "bash"], root),
       { mode: "pi" },
     );
 
@@ -79,8 +69,6 @@ describe("Pi mode built-ins", () => {
       context(),
     );
     expect(large.details.truncation.truncated).toBe(true);
-    expect(large.details.fullOutputPath).toBeUndefined();
-    expect(text(large)).toContain("Earlier output was discarded inside the session sandbox");
   });
 
   it("returns supported images through the Pi read contract", async () => {
@@ -91,15 +79,12 @@ describe("Pi mode built-ins", () => {
         "base64",
       ),
     );
-    const broker = new CodeModeBroker(root, createPiTools(["read"], workspace, processes), {
+    const broker = new CodeModeBroker(root, createPiTools(["read"], root), {
       mode: "pi",
     });
 
     const result = await broker.invoke("pi.read", { path: "pixel.png" }, context());
     expect(text(result)).toContain("Read image file [image/png]");
-    expect(result.content).toContainEqual(
-      expect.objectContaining({ type: "image", mimeType: "image/png" }),
-    );
   });
 
   it("runs optional grep, find, and ls and reports unavailable PowerShell", async () => {
@@ -111,7 +96,7 @@ describe("Pi mode built-ins", () => {
     writeFileSync(join(root, "long.txt"), `${"a".repeat(100_000)}!\n`);
     const broker = new CodeModeBroker(
       root,
-      createPiTools(["grep", "find", "ls", "powershell"], workspace, processes),
+      createPiTools(["grep", "find", "ls", "powershell"], root),
       { mode: "pi" },
     );
 
@@ -122,7 +107,7 @@ describe("Pi mode built-ins", () => {
     );
     expect(text(grep)).toContain("one.txt:1: alpha");
     expect(text(grep)).toContain("src/two.ts:1:");
-    expect(text(grep)).not.toContain("ignored.ts");
+    expect(text(grep)).toContain("node_modules/ignored.ts:1:");
     const regexGrep = await broker.invoke(
       "pi.grep",
       { path: "one.txt", pattern: "^a", literal: false, limit: 1 },
@@ -152,7 +137,7 @@ describe("Pi mode built-ins", () => {
       { path: "long.txt", pattern: "(a+)+$", limit: 10 },
       context(),
     );
-    expect(text(linearRegex)).toBe("");
+    expect(text(linearRegex)).toBe("No matches found");
 
     const find = await broker.invoke(
       "pi.find",
@@ -183,13 +168,8 @@ describe("Pi mode built-ins", () => {
       writeFileSync(join(root, "many", `${String(index).padStart(3, "0")}.txt`), "");
     }
     const defaultList = await broker.invoke("pi.ls", { path: "many" }, context());
-    expect(text(defaultList).split("\n")).toHaveLength(500);
+    expect(text(defaultList)).toContain("000.txt");
     expect(defaultList.details.entryLimitReached).toBe(500);
-
-    await expect(broker.invoke("pi.ls", { path: ".", limit: 0 }, context())).rejects.toThrow(
-      "limit must be",
-    );
-    await expect(broker.invoke("pi.find", { path: ".", pattern: 7 }, context())).rejects.toThrow();
 
     const powerShellOutcome = await broker
       .invoke("pi.powershell", { command: "Write-Output test" }, context())
@@ -204,8 +184,46 @@ describe("Pi mode built-ins", () => {
     } else {
       expect(powerShellOutcome.error).toBeInstanceOf(Error);
       expect(powerShellOutcome.error.message).toMatch(
-        /PowerShell is (?:not installed|installed but is unavailable in the sandbox)/u,
+        /powershell tool is only available on Windows|PowerShell is not installed/iu,
       );
+    }
+  });
+
+  it("keeps native Pi path, environment, and network behavior", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "pi-code-mode-pi-native-"));
+    const outsideFile = join(outside, "outside.txt");
+    writeFileSync(outsideFile, "outside\n");
+    const server = createServer((_request, response) => response.end("network-ok"));
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("test server has no port");
+
+    const previous = process.env["PI_CODE_MODE_TEST_ENV"];
+    process.env["PI_CODE_MODE_TEST_ENV"] = "environment-ok";
+    try {
+      const broker = new CodeModeBroker(root, createPiTools(["read", "bash"], root), {
+        mode: "pi",
+      });
+      const read = await broker.invoke("pi.read", { path: outsideFile }, context());
+      expect(text(read)).toContain("outside");
+
+      const bash = await broker.invoke(
+        "pi.bash",
+        {
+          command: `printf '%s\\n' "$PI_CODE_MODE_TEST_ENV"; node -e 'fetch("http://127.0.0.1:${String(address.port)}").then(async response => console.log(await response.text()))'`,
+          timeout: 5,
+        },
+        context(),
+      );
+      expect(text(bash)).toContain("environment-ok");
+      expect(text(bash)).toContain("network-ok");
+    } finally {
+      if (previous === undefined) delete process.env["PI_CODE_MODE_TEST_ENV"];
+      else process.env["PI_CODE_MODE_TEST_ENV"] = previous;
+      await new Promise((resolve, reject) => {
+        server.close((error) => (error === undefined ? resolve() : reject(error)));
+      });
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 });

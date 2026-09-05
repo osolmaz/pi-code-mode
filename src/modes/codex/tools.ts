@@ -1,11 +1,7 @@
 import type { CodeModeToolDescriptor } from "../../broker/types.js";
 import { applyPatch } from "./apply-patch.js";
-import type {
-  ExecCommandInput,
-  SandboxedProcessManager,
-  WriteStdinInput,
-} from "../../sandbox/process-manager.js";
-import type { WorkspaceSandbox } from "../../sandbox/workspace.js";
+import type { ExecCommandInput, ProcessManager, WriteStdinInput } from "../../process-manager.js";
+import type { Workspace } from "../../workspace.js";
 
 const COMMAND_RESULT_SCHEMA = {
   type: "object",
@@ -22,8 +18,8 @@ const COMMAND_RESULT_SCHEMA = {
 } as const;
 
 export function createCodexTools(
-  workspace: WorkspaceSandbox,
-  processes: SandboxedProcessManager,
+  workspace: Workspace,
+  processes: ProcessManager,
 ): readonly CodeModeToolDescriptor[] {
   return Object.freeze([
     Object.freeze({

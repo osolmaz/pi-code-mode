@@ -6,7 +6,6 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_PI_BUILTINS,
   VANILLA_PI_BUILTINS,
-  WorkspaceSandbox,
   createCodexTools,
   createPiTools,
 } from "../src/index.ts";
@@ -61,14 +60,10 @@ describe("pinned upstream tool contracts", () => {
     expect(DEFAULT_PI_BUILTINS).toEqual(expected.defaultBuiltins);
 
     const root = mkdtempSync(join(tmpdir(), "pi-code-mode-contract-"));
-    const workspace = new WorkspaceSandbox(root);
     try {
-      const tools = createPiTools(DEFAULT_PI_BUILTINS, workspace, {
-        runOneShot: async () => ({ exitCode: 0 }),
-      });
+      const tools = createPiTools(DEFAULT_PI_BUILTINS, root);
       expect(tools.map(normalized)).toEqual(expected.defaultTools);
     } finally {
-      workspace.close();
       rmSync(root, { recursive: true, force: true });
     }
   });

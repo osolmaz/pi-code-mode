@@ -7,6 +7,8 @@ updated: 2026-09-01
 
 # Plan: Deno Core host for Pi Code Mode
 
+> The coding-tool permission and sandbox design in this historical plan is superseded by [Remove extra coding-tool restrictions](2026-09-06-native-tool-parity-plan.md). The Deno Core JavaScript host stays isolated. Nested coding tools now use the parent process and native Pi permissions.
+
 > Assumption: “demo core” means `deno_core`.
 
 ## Objective

@@ -49,14 +49,14 @@ export { CodeModeHostManager, CodeModeHostSession } from "./host/session.js";
 export { applyPatch, parseApplyPatch } from "./modes/codex/apply-patch.js";
 export { createCodexTools } from "./modes/codex/tools.js";
 export { createPiTools } from "./modes/pi/tools.js";
-export { SandboxedProcessManager } from "./sandbox/process-manager.js";
+export { ProcessManager } from "./process-manager.js";
 export type {
   CommandResult,
   ExecCommandInput,
-  SandboxedProcessManagerOptions,
+  ProcessManagerOptions,
   WriteStdinInput,
-} from "./sandbox/process-manager.js";
-export { WorkspaceSandbox } from "./sandbox/workspace.js";
+} from "./process-manager.js";
+export { Workspace } from "./workspace.js";
 export { assertOpenAICodeMode, supportsOpenAICodeMode } from "./provider/capabilities.js";
 export {
   CODE_MODE_EXEC_CONSTRAINED_SAMPLING,

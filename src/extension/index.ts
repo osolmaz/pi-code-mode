@@ -39,8 +39,8 @@ import {
   DEFAULT_CODE_MODE_OUTPUT_TOKENS,
   MAX_CODE_MODE_OUTPUT_TOKENS,
 } from "../provider/openai-contract.js";
-import { SandboxedProcessManager } from "../sandbox/process-manager.js";
-import { WorkspaceSandbox } from "../sandbox/workspace.js";
+import { ProcessManager } from "../process-manager.js";
+import { Workspace } from "../workspace.js";
 
 const DEFAULT_WAIT_MS = 10_000;
 const MAX_WAIT_MS = 30 * 60 * 1000;
@@ -61,8 +61,8 @@ class RuntimeOwner {
   #hostManager: CodeModeHostManager | undefined;
   #hostSession: CodeModeHostSession | undefined;
   #starting: Promise<CodeModeHostSession> | undefined;
-  #workspace: WorkspaceSandbox | undefined;
-  #processes: SandboxedProcessManager | undefined;
+  #workspace: Workspace | undefined;
+  #processes: ProcessManager | undefined;
   #contract: CodeModeSessionContract | undefined;
   #descriptors: readonly CodeModeToolDescriptor[] = [];
 
@@ -85,9 +85,9 @@ class RuntimeOwner {
     registrations: readonly CodeModeToolRegistration[],
   ): Promise<void> {
     await this.shutdown();
-    const workspace = new WorkspaceSandbox(cwd);
+    const workspace = new Workspace(cwd);
     try {
-      const processes = new SandboxedProcessManager(workspace, {
+      const processes = new ProcessManager(cwd, {
         ...(this.#hostProcess?.binaryPath === undefined
           ? {}
           : { hostBinary: this.#hostProcess.binaryPath }),
@@ -95,7 +95,7 @@ class RuntimeOwner {
       const builtins =
         contract.mode === "codex"
           ? createCodexTools(workspace, processes)
-          : createPiTools(contract.piBuiltins, workspace, processes);
+          : createPiTools(contract.piBuiltins, cwd);
       const descriptors = new CodeModeBroker(workspace.root, [...builtins, ...registrations], {
         mode: contract.mode,
       }).descriptors;
