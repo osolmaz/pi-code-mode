@@ -67,7 +67,6 @@ type ManagedProcess = {
   terminationTimer?: NodeJS.Timeout;
   evictionTimer?: NodeJS.Timeout;
   postExitTimer?: NodeJS.Timeout;
-  outputListeners: Set<(data: Buffer) => void>;
   finishListeners: Set<() => void>;
 };
 
@@ -172,11 +171,7 @@ export class ProcessManager {
 
   // Command validation keeps each option and working-directory check independent.
   // eslint-disable-next-line complexity
-  async #exec(
-    input: ExecCommandInput,
-    signal?: AbortSignal,
-    onData?: (data: Buffer) => void,
-  ): Promise<CommandResult> {
+  async #exec(input: ExecCommandInput, signal?: AbortSignal): Promise<CommandResult> {
     this.#assertOpen();
     signal?.throwIfAborted();
     if (typeof input.cmd !== "string" || input.cmd.length === 0) {
@@ -192,7 +187,7 @@ export class ProcessManager {
       ? resolve(requestedWorkdir)
       : resolve(this.#root, requestedWorkdir);
     if (!statSync(workdir).isDirectory()) throw new Error("workdir must be a directory");
-    const managed = this.#spawn(input.cmd, workdir, input.tty ?? false, onData);
+    const managed = this.#spawn(input.cmd, workdir, input.tty ?? false);
     const onAbort = (): void => {
       this.#terminate(managed);
     };
@@ -262,7 +257,6 @@ export class ProcessManager {
       if (process.evictionTimer !== undefined) clearTimeout(process.evictionTimer);
       if (process.lifetimeTimer !== undefined) clearTimeout(process.lifetimeTimer);
       if (process.postExitTimer !== undefined) clearTimeout(process.postExitTimer);
-      process.outputListeners.clear();
       process.finishListeners.clear();
       if (process.exited) this.#finalize(process, process.exitCode ?? 1);
       process.child.unref();
@@ -273,12 +267,7 @@ export class ProcessManager {
     this.#processes.clear();
   }
 
-  #spawn(
-    command: string,
-    cwd: string,
-    tty: boolean,
-    onData?: (data: Buffer) => void,
-  ): ManagedProcess {
+  #spawn(command: string, cwd: string, tty: boolean): ManagedProcess {
     const activeProcesses = [...this.#processes.values()].filter(
       (process) => !process.closed,
     ).length;
@@ -314,7 +303,6 @@ export class ProcessManager {
       stdoutEnded: false,
       stderrEnded: false,
       closed: false,
-      outputListeners: new Set(onData === undefined ? [] : [onData]),
       finishListeners: new Set(),
     };
     this.#processes.set(id, managed);
@@ -358,15 +346,13 @@ export class ProcessManager {
     return managed;
   }
 
-  // Output collection combines streaming, idle-drain, byte limits, and cancellation.
-  // eslint-disable-next-line complexity
+  // Output collection combines streaming, idle-drain, and retained-output bounds.
   #append(process: ManagedProcess, chunk: Buffer, decoder?: StringDecoder): void {
     if (process.closed) return;
     if (process.exited) this.#armPostExitTimer(process);
     const remaining = Math.max(0, MAX_TOTAL_OUTPUT_BYTES - process.outputBytes);
     const accepted = chunk.subarray(0, remaining);
     if (accepted.length > 0) {
-      for (const listener of process.outputListeners) listener(accepted);
       process.output += decoder?.write(accepted) ?? accepted.toString("utf8");
     }
     process.outputBytes += chunk.length;
@@ -375,11 +361,9 @@ export class ProcessManager {
     process.outputLimitExceeded = true;
     this.#flushOutputDecoders(process);
     const notice = Buffer.from(
-      `\n[command terminated after exceeding the ${String(MAX_TOTAL_OUTPUT_BYTES)}-byte output limit]\n`,
+      `\n[further command output discarded after the ${String(MAX_TOTAL_OUTPUT_BYTES)}-byte retention limit]\n`,
     );
-    for (const listener of process.outputListeners) listener(notice);
     process.output += notice.toString("utf8");
-    this.#terminate(process);
   }
 
   #armPostExitTimer(process: ManagedProcess): void {
@@ -402,7 +386,6 @@ export class ProcessManager {
     if (process.postExitTimer !== undefined) clearTimeout(process.postExitTimer);
     if (process.lifetimeTimer !== undefined) clearTimeout(process.lifetimeTimer);
     this.#flushOutputDecoders(process);
-    process.outputListeners.clear();
     process.child.stdout?.destroy();
     process.child.stderr?.destroy();
     for (const listener of process.finishListeners) listener();

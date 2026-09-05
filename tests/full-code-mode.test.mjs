@@ -284,6 +284,15 @@ PY`,
     expect(truncated.output).toContain("output truncated");
     expect(truncated.original_token_count).toBeGreaterThan(1);
 
+    const outputMarker = join(root, "large-output-finished.txt");
+    const retained = await processes.exec({
+      cmd: `python3 -c 'print("x" * (9 * 1024 * 1024))'; printf finished > "${outputMarker}"`,
+      yield_time_ms: 5_000,
+    });
+    expect(retained.exit_code).toBe(0);
+    expect(retained.output).toContain("further command output discarded");
+    expect(readFileSync(outputMarker, "utf8")).toBe("finished");
+
     const pidFile = join(root, "cancelled.pid");
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 100);
