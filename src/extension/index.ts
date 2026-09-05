@@ -80,14 +80,14 @@ class RuntimeOwner {
   }
 
   async configure(
-    cwd: string,
+    context: ExtensionContext,
     contract: CodeModeSessionContract,
     registrations: readonly CodeModeToolRegistration[],
   ): Promise<void> {
     await this.shutdown();
-    const workspace = new Workspace(cwd);
+    const workspace = new Workspace(context.cwd);
     try {
-      const processes = new ProcessManager(cwd, {
+      const processes = new ProcessManager(context.cwd, {
         ...(this.#hostProcess?.binaryPath === undefined
           ? {}
           : { hostBinary: this.#hostProcess.binaryPath }),
@@ -95,7 +95,7 @@ class RuntimeOwner {
       const builtins =
         contract.mode === "codex"
           ? createCodexTools(workspace, processes)
-          : createPiTools(contract.piBuiltins, cwd);
+          : createPiTools(contract.piBuiltins, context.cwd, context);
       const descriptors = new CodeModeBroker(workspace.root, [...builtins, ...registrations], {
         mode: contract.mode,
       }).descriptors;
@@ -473,7 +473,7 @@ function installCodeMode(
         if (!hasConversation(context)) {
           contract = next;
           pi.appendEntry(CODE_MODE_SESSION_ENTRY, next);
-          await runtime.configure(context.cwd, next, registrations);
+          await runtime.configure(context, next, registrations);
           registerTools();
           activate();
           context.ui.notify(`Code Mode changed to ${selected}.`, "info");
@@ -515,7 +515,7 @@ function installCodeMode(
         configuredMode(options) === "pi" ? activePiBuiltins(pi, options, baselineTools) : [],
       );
     if (sessionContract(context) === undefined) pi.appendEntry(CODE_MODE_SESSION_ENTRY, contract);
-    await runtime.configure(context.cwd, contract, registrations);
+    await runtime.configure(context, contract, registrations);
     registerTools();
     activate();
   });

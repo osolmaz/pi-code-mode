@@ -16,8 +16,7 @@ const MAX_MAX_OUTPUT_TOKENS = 100_000;
 const MAX_TOTAL_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_WALL_TIME_LIMIT_MS = 24 * 60 * 60 * 1_000;
-const DEFAULT_MAX_ACTIVE_PROCESSES = 64;
-const MAX_ACTIVE_PROCESSES = 64;
+const EXIT_STDIO_GRACE_MS = 100;
 const COMPLETED_PROCESS_RETENTION_MS = 60_000;
 const MAX_COMPLETED_PROCESSES = 16;
 const MAX_COMPLETED_OUTPUT_BYTES = 32 * 1024 * 1024;
@@ -60,11 +59,16 @@ type ManagedProcess = {
   stderrDecoder: StringDecoder;
   cursor: number;
   exitCode?: number;
+  exited: boolean;
+  stdoutEnded: boolean;
+  stderrEnded: boolean;
   closed: boolean;
   lifetimeTimer?: NodeJS.Timeout;
   terminationTimer?: NodeJS.Timeout;
   evictionTimer?: NodeJS.Timeout;
+  postExitTimer?: NodeJS.Timeout;
   outputListeners: Set<(data: Buffer) => void>;
+  finishListeners: Set<() => void>;
 };
 
 export type ProcessManagerOptions = {
@@ -76,7 +80,7 @@ export type ProcessManagerOptions = {
 type ResolvedProcessManagerOptions = {
   hostBinary: string;
   wallTimeLimitMs?: number;
-  maxActiveProcesses: number;
+  maxActiveProcesses?: number;
 };
 
 type Unrefable = { unref: () => void };
@@ -148,13 +152,17 @@ export class ProcessManager {
               "wallTimeLimitMs",
             ),
           }),
-      maxActiveProcesses: boundedInteger(
-        options.maxActiveProcesses,
-        DEFAULT_MAX_ACTIVE_PROCESSES,
-        1,
-        MAX_ACTIVE_PROCESSES,
-        "maxActiveProcesses",
-      ),
+      ...(options.maxActiveProcesses === undefined
+        ? {}
+        : {
+            maxActiveProcesses: boundedInteger(
+              options.maxActiveProcesses,
+              options.maxActiveProcesses,
+              1,
+              Number.MAX_SAFE_INTEGER,
+              "maxActiveProcesses",
+            ),
+          }),
     };
   }
 
@@ -245,13 +253,18 @@ export class ProcessManager {
     }
   }
 
+  // Shutdown releases ownership without changing the managed commands' lifecycle.
+  // eslint-disable-next-line complexity
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
     for (const process of this.#processes.values()) {
       if (process.evictionTimer !== undefined) clearTimeout(process.evictionTimer);
       if (process.lifetimeTimer !== undefined) clearTimeout(process.lifetimeTimer);
+      if (process.postExitTimer !== undefined) clearTimeout(process.postExitTimer);
       process.outputListeners.clear();
+      process.finishListeners.clear();
+      if (process.exited) this.#finalize(process, process.exitCode ?? 1);
       process.child.unref();
       for (const stream of [process.child.stdin, process.child.stdout, process.child.stderr]) {
         (stream as unknown as Unrefable).unref();
@@ -269,7 +282,10 @@ export class ProcessManager {
     const activeProcesses = [...this.#processes.values()].filter(
       (process) => !process.closed,
     ).length;
-    if (activeProcesses >= this.#options.maxActiveProcesses) {
+    if (
+      this.#options.maxActiveProcesses !== undefined &&
+      activeProcesses >= this.#options.maxActiveProcesses
+    ) {
       throw new Error(
         `Code Mode allows at most ${String(this.#options.maxActiveProcesses)} active processes`,
       );
@@ -294,8 +310,12 @@ export class ProcessManager {
       stdoutDecoder: new StringDecoder("utf8"),
       stderrDecoder: new StringDecoder("utf8"),
       cursor: 0,
+      exited: false,
+      stdoutEnded: false,
+      stderrEnded: false,
       closed: false,
       outputListeners: new Set(onData === undefined ? [] : [onData]),
+      finishListeners: new Set(),
     };
     this.#processes.set(id, managed);
     if (this.#options.wallTimeLimitMs !== undefined) {
@@ -309,16 +329,25 @@ export class ProcessManager {
     child.stderr.on("data", (chunk: Buffer) => {
       this.#append(managed, chunk, managed.stderrDecoder);
     });
+    child.stdout.once("end", () => {
+      managed.stdoutEnded = true;
+      this.#maybeFinalizeAfterExit(managed);
+    });
+    child.stderr.once("end", () => {
+      managed.stderrEnded = true;
+      this.#maybeFinalizeAfterExit(managed);
+    });
     child.once("error", (error) => {
       this.#append(managed, Buffer.from(`command worker failed: ${error.message}\n`));
     });
-    child.once("close", (code, signal) => {
-      this.#flushOutputDecoders(managed);
-      managed.closed = true;
+    child.once("exit", (code, signal) => {
+      managed.exited = true;
       managed.exitCode = code ?? (signal === null ? 1 : 128);
-      if (managed.lifetimeTimer !== undefined) clearTimeout(managed.lifetimeTimer);
-      managed.outputListeners.clear();
-      this.#retainCompleted(managed);
+      this.#maybeFinalizeAfterExit(managed);
+      if (!managed.closed) this.#armPostExitTimer(managed);
+    });
+    child.once("close", (code, signal) => {
+      this.#finalize(managed, code ?? managed.exitCode ?? (signal === null ? 1 : 128));
     });
     child.stdin.write(`${config}\n`, (error) => {
       if (error !== null && error !== undefined) {
@@ -329,7 +358,11 @@ export class ProcessManager {
     return managed;
   }
 
+  // Output collection combines streaming, idle-drain, byte limits, and cancellation.
+  // eslint-disable-next-line complexity
   #append(process: ManagedProcess, chunk: Buffer, decoder?: StringDecoder): void {
+    if (process.closed) return;
+    if (process.exited) this.#armPostExitTimer(process);
     const remaining = Math.max(0, MAX_TOTAL_OUTPUT_BYTES - process.outputBytes);
     const accepted = chunk.subarray(0, remaining);
     if (accepted.length > 0) {
@@ -349,6 +382,34 @@ export class ProcessManager {
     this.#terminate(process);
   }
 
+  #armPostExitTimer(process: ManagedProcess): void {
+    if (process.postExitTimer !== undefined) clearTimeout(process.postExitTimer);
+    process.postExitTimer = setTimeout(() => {
+      this.#finalize(process, process.exitCode ?? 1);
+    }, EXIT_STDIO_GRACE_MS);
+  }
+
+  #maybeFinalizeAfterExit(process: ManagedProcess): void {
+    if (process.exited && process.stdoutEnded && process.stderrEnded) {
+      this.#finalize(process, process.exitCode ?? 1);
+    }
+  }
+
+  #finalize(process: ManagedProcess, exitCode: number): void {
+    if (process.closed) return;
+    process.closed = true;
+    process.exitCode = exitCode;
+    if (process.postExitTimer !== undefined) clearTimeout(process.postExitTimer);
+    if (process.lifetimeTimer !== undefined) clearTimeout(process.lifetimeTimer);
+    this.#flushOutputDecoders(process);
+    process.outputListeners.clear();
+    process.child.stdout?.destroy();
+    process.child.stderr?.destroy();
+    for (const listener of process.finishListeners) listener();
+    process.finishListeners.clear();
+    this.#retainCompleted(process);
+  }
+
   #flushOutputDecoders(process: ManagedProcess): void {
     if (process.outputDecodersFlushed) return;
     process.outputDecodersFlushed = true;
@@ -360,13 +421,10 @@ export class ProcessManager {
     if (process.closed) return;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(done, milliseconds);
-      const onClose = (): void => {
-        done();
-      };
-      process.child.once("close", onClose);
+      process.finishListeners.add(done);
       function done(): void {
         clearTimeout(timer);
-        process.child.removeListener("close", onClose);
+        process.finishListeners.delete(done);
         resolve();
       }
     });
@@ -385,7 +443,7 @@ export class ProcessManager {
   }
 
   #retainCompleted(process: ManagedProcess): void {
-    if (this.#processes.get(process.id) !== process) return;
+    if (this.#closed || this.#processes.get(process.id) !== process) return;
     process.evictionTimer = setTimeout(() => {
       this.#remove(process.id);
     }, COMPLETED_PROCESS_RETENTION_MS);
