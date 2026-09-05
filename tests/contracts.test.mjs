@@ -61,14 +61,14 @@ describe("pinned upstream tool contracts", () => {
 
     const root = mkdtempSync(join(tmpdir(), "pi-code-mode-contract-"));
     try {
-      const tools = createPiTools(DEFAULT_PI_BUILTINS, root, {
+      const tools = createPiTools(DEFAULT_PI_BUILTINS, root, () => ({
         model: undefined,
         thinkingLevel: "off",
         sessionManager: {
           getSessionId: () => "contract-test",
           getSessionFile: () => undefined,
         },
-      });
+      }));
       expect(tools.map(normalized)).toEqual(expected.defaultTools);
     } finally {
       rmSync(root, { recursive: true, force: true });

@@ -425,6 +425,40 @@ describe("Pi extension", () => {
     expect(terminated.details.status).toBe("terminated");
   });
 
+  it("uses the current Pi context when a yielded cell resumes", async () => {
+    const extension = loadExtension({ mode: "pi" });
+    await extension.start();
+    const exec = await extension.tools.get("exec").execute(
+      "context-waiting",
+      {
+        code: `await yield_control();
+const result = await tools.bash({ command: 'printf "%s" "$PI_PROVIDER:$PI_MODEL:$PI_REASONING_LEVEL"' });
+text(result.content[0].text);`,
+      },
+      undefined,
+      undefined,
+      extension.context(),
+    );
+    expect(exec.details.status).toBe("waiting");
+
+    const currentModel = {
+      ...SUPPORTED_MODEL,
+      provider: "current-provider",
+      id: "current-model",
+    };
+    const waited = await extension.tools
+      .get("wait")
+      .execute(
+        "context-wait",
+        { cell_id: exec.details.cellId, yield_time_ms: 2_000, max_tokens: 1_000 },
+        undefined,
+        undefined,
+        extension.context({ model: currentModel, thinkingLevel: "high" }),
+      );
+    expect(waited.details.status).toBe("completed");
+    expect(waited.content[0].text).toBe("current-provider:current-model:high");
+  });
+
   it("returns bounded errors for unknown waits", async () => {
     const extension = loadExtension();
     await extension.start();
