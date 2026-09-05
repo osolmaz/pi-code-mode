@@ -1,14 +1,5 @@
-import {
-  chmodSync,
-  existsSync,
-  mkdtempSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  truncateSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,8 +8,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CodeModeBroker,
   CodeModeHostManager,
-  SandboxedProcessManager,
-  WorkspaceSandbox,
+  ProcessManager,
+  Workspace,
   applyPatch,
   parseApplyPatch,
   resolveLimits,
@@ -30,8 +21,8 @@ let processes;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "pi-code-mode-full-"));
-  workspace = new WorkspaceSandbox(root);
-  processes = new SandboxedProcessManager(workspace);
+  workspace = new Workspace(root);
+  processes = new ProcessManager(root);
 });
 
 afterEach(() => {
@@ -40,98 +31,47 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-describe("writable workspace sandbox", () => {
-  it("maps virtual /tmp, writes atomically, and blocks escapes and sensitive paths", async () => {
-    await workspace.writeFile("file.txt", "workspace");
-    await workspace.writeFile("/tmp/private.txt", "scratch");
+describe("Codex workspace operations", () => {
+  it("uses normal relative and absolute paths without content filters", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "pi-code-mode-outside-"));
+    const outsideFile = join(outside, "outside.txt");
+    try {
+      await workspace.writeFile("file.txt", "workspace");
+      await workspace.writeFile(outsideFile, "outside");
+      await workspace.writeFile(".env", "TEST_ONLY=value\n");
+      await workspace.writeFile("deploy.pem", "test-only\n");
 
-    expect(readFileSync(join(root, "file.txt"), "utf8")).toBe("workspace");
-    expect(workspace.readFile("/tmp/private.txt").toString()).toBe("scratch");
-    expect(() => workspace.readFile("../outside")).toThrow("escapes");
-    expect(() => workspace.resolve(".env")).toThrow("sensitive path");
+      expect(readFileSync(join(root, "file.txt"), "utf8")).toBe("workspace");
+      expect(workspace.readFile(outsideFile).toString()).toBe("outside");
+      expect(workspace.readFile(".env").toString()).toBe("TEST_ONLY=value\n");
+      expect(workspace.readFile("deploy.pem").toString()).toBe("test-only\n");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
-  it("covers existing paths, permissions, moves, removals, and symlink write guards", async () => {
+  it("supports permissions, moves, removals, and lifecycle checks", async () => {
+    const fileRoot = join(root, "not-a-directory");
+    writeFileSync(fileRoot, "file");
+    expect(() => new Workspace(fileRoot)).toThrow("workspace root must be a directory");
+    expect(() => new ProcessManager(fileRoot)).toThrow("working directory must be a directory");
+
     writeFileSync(join(root, "mode.txt"), "mode\n", { mode: 0o744 });
     mkdirSync(join(root, "dir"));
-    symlinkSync(join(root, "mode.txt"), join(root, "link.txt"));
 
-    await workspace.writeFile(join(root, "mode.txt"), "changed\n");
+    await workspace.mutate(() => workspace.writeFile(join(root, "mode.txt"), "changed\n"));
     expect(workspace.stat("mode.txt").mode & 0o777).toBe(0o744);
-    expect(() => workspace.resolve("link.txt", { write: true })).toThrow("symbolic links");
     await workspace.move("mode.txt", "dir/moved.txt");
     expect(workspace.exists("mode.txt")).toBe(false);
+    await workspace.chmod("dir/moved.txt", 0o600);
+    expect(statSync(join(root, "dir", "moved.txt")).mode & 0o777).toBe(0o600);
     await workspace.remove("dir", true);
     expect(workspace.exists("dir")).toBe(false);
     await expect(workspace.remove(".", true)).rejects.toThrow("cannot remove");
-    expect(() => workspace.resolve("/etc/passwd")).toThrow("escapes");
     expect(() => workspace.resolve("bad\0path")).toThrow("invalid");
-    writeFileSync(join(root, "large.bin"), "");
-    truncateSync(join(root, "large.bin"), 16 * 1024 * 1024 + 1);
-    expect(() => workspace.readFile("large.bin")).toThrow("read limit");
-    chmodSync(root, 0o700);
-  });
-
-  it("accounts for automatically created scratch parent directories", async () => {
-    const limited = new WorkspaceSandbox(root, tmpdir(), 16 * 1_024);
-    try {
-      await expect(limited.writeFile("/tmp/a/b/c/d/e/file.txt", "value")).rejects.toThrow(
-        "session scratch exceeds",
-      );
-      expect(limited.exists("/tmp/a")).toBe(false);
-      await expect(limited.mkdir("/tmp/a/b/c/d/e")).rejects.toThrow("session scratch exceeds");
-      expect(limited.exists("/tmp/a")).toBe(false);
-    } finally {
-      limited.close();
-    }
-  });
-
-  it("rejects invalid roots, cross-area moves, and operations after close", async () => {
-    const fileRoot = join(root, "not-a-directory");
-    writeFileSync(fileRoot, "file");
-    expect(() => new WorkspaceSandbox(fileRoot)).toThrow("workspace root must be a directory");
-    expect(() => new WorkspaceSandbox(root, tmpdir(), 0)).toThrow("maxScratchBytes");
-
-    expect(() => workspace.resolve(0)).toThrow("path must not be empty");
-    await workspace.writeFile("/tmp/move.txt", "scratch");
-    await expect(workspace.move("/tmp/move.txt", "move.txt")).rejects.toThrow(
-      "moves cannot cross sandbox areas",
-    );
-    await expect(workspace.remove("/tmp", true)).rejects.toThrow("cannot remove");
 
     workspace.close();
-    expect(() => workspace.resolve("closed.txt")).toThrow("workspace sandbox is closed");
-  });
-
-  it("keeps writes inside stable directory descriptors during a symlink race", async () => {
-    const outside = mkdtempSync(join(tmpdir(), "pi-code-mode-outside-"));
-    const racer = new SandboxedProcessManager(workspace, { wallTimeLimitMs: 10_000 });
-    mkdirSync(join(root, "race"));
-    try {
-      const running = await racer.exec({
-        cmd: `while :; do
-  rm -rf race
-  ln -s '${outside}' race
-  rm -f race
-  mkdir race
-done`,
-        yield_time_ms: 250,
-      });
-      expect(running.session_id).toBeTypeOf("number");
-
-      for (let index = 0; index < 200; index += 1) {
-        try {
-          await workspace.writeFile("race/escaped.txt", String(index));
-        } catch {
-          // A concurrent path replacement must fail rather than escape the workspace.
-        }
-      }
-      expect(existsSync(join(outside, "escaped.txt"))).toBe(false);
-    } finally {
-      racer.close();
-      await new Promise((resolve) => setTimeout(resolve, 2_300));
-      rmSync(outside, { recursive: true, force: true });
-    }
+    expect(() => workspace.resolve("closed.txt")).toThrow("workspace is closed");
   });
 
   it("applies multi-file Codex patches and rolls back a failed patch", async () => {
@@ -171,9 +111,9 @@ done`,
     expect(workspace.stat("executable.sh").mode & 0o777).toBe(0o755);
     expect(workspace.exists("created")).toBe(false);
   });
-  it("preserves CRLF line endings when it updates a file", async () => {
-    writeFileSync(join(root, "windows.txt"), "first\r\nsecond\r\n");
 
+  it("preserves CRLF and parses move, insertion, deletion, and malformed patches", async () => {
+    writeFileSync(join(root, "windows.txt"), "first\r\nsecond\r\n");
     await applyPatch(
       workspace,
       `*** Begin Patch
@@ -184,14 +124,11 @@ done`,
 +changed
 *** End Patch`,
     );
-
     expect(readFileSync(join(root, "windows.txt"), "utf8")).toBe("first\r\nchanged\r\n");
-  });
 
-  it("parses delete, move, insertion, and malformed Codex patch cases", async () => {
     writeFileSync(join(root, "move.txt"), "first\nlast");
     writeFileSync(join(root, "delete.txt"), "delete\n");
-    const operations = parseApplyPatch(`*** Begin Patch
+    const patch = `*** Begin Patch
 *** Update File: move.txt
 *** Move to: moved.txt
 @@
@@ -201,26 +138,13 @@ done`,
 -last
 +after
 *** Delete File: delete.txt
-*** End Patch`);
-    expect(operations).toHaveLength(2);
-    await applyPatch(
-      workspace,
-      `*** Begin Patch
-*** Update File: move.txt
-*** Move to: moved.txt
-@@
-+before
- first
-@@
--last
-+after
-*** Delete File: delete.txt
-*** End Patch`,
-    );
+*** End Patch`;
+    expect(parseApplyPatch(patch)).toHaveLength(2);
+    await applyPatch(workspace, patch);
     expect(readFileSync(join(root, "moved.txt"), "utf8")).toBe("before\nfirst\nafter");
     expect(workspace.exists("delete.txt")).toBe(false);
 
-    for (const patch of [
+    for (const invalid of [
       "bad",
       "*** Begin Patch\n*** End Patch",
       "*** Begin Patch\n*** Unknown: x\n*** End Patch",
@@ -228,131 +152,82 @@ done`,
       "*** Begin Patch\n*** Update File: moved.txt\nplain\n*** End Patch",
       "*** Begin Patch\n*** Update File: moved.txt\n@@\n?bad\n*** End Patch",
     ]) {
-      expect(() => parseApplyPatch(patch)).toThrow();
+      expect(() => parseApplyPatch(invalid)).toThrow();
     }
   });
 });
 
-describe("sandboxed command process", () => {
-  it("runs workspace commands while denying network sockets and host files", async () => {
-    const result = await processes.exec({
-      cmd: `printf written > command.txt
-python3 - <<'PY'
-import os
-import socket
-try:
-    socket.socket()
-    print("network-open")
-except OSError as error:
-    print("network-blocked", error.errno)
-try:
-    open("/etc/passwd").read()
-    print("host-open")
-except OSError:
-    print("host-blocked")
-try:
-    os.listdir("/dev/pts")
-    print("host-ptys-open")
-except OSError:
-    print("host-ptys-blocked")
-PY`,
-      yield_time_ms: 2_000,
-    });
-
-    expect(result.exit_code).toBe(0);
-    expect(result.output).toContain("network-blocked 1");
-    expect(result.output).toContain("host-blocked");
-    expect(result.output).toContain("host-ptys-blocked");
-    expect(readFileSync(join(root, "command.txt"), "utf8")).toBe("written");
-  });
-
-  it("blocks commands from escaping cleanup through a detached session", async () => {
-    const result = await processes.exec({
-      cmd: "setsid sh -c 'sleep 0.4; printf escaped > detached.txt' >/dev/null 2>&1 &",
-      yield_time_ms: 2_000,
-    });
-    expect(result.exit_code).toBe(0);
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    expect(workspace.exists("detached.txt")).toBe(false);
-  });
-
-  it("reaps background descendants that retain command pipes", async () => {
-    const result = await processes.exec({ cmd: "sleep 999 &", yield_time_ms: 2_000 });
-
-    expect(result.exit_code).toBe(0);
-    expect(result.wall_time_seconds).toBeLessThan(2);
-  });
-
-  it("kills redirected background descendants before reporting completion", async () => {
-    const result = await processes.exec({
-      cmd: "(sleep 0.4; printf escaped > delayed.txt) </dev/null >/dev/null 2>&1 &",
-      yield_time_ms: 2_000,
-    });
-
-    expect(result.exit_code).toBe(0);
-    await new Promise((resolve) => setTimeout(resolve, 700));
-    expect(existsSync(join(root, "delayed.txt"))).toBe(false);
-  });
-
-  it("rejects command-created special files without blocking the parent", async () => {
-    const result = await processes.exec({ cmd: "mkfifo blocked.pipe", yield_time_ms: 2_000 });
-
-    expect(result.exit_code).toBe(0);
-    expect(() => workspace.readFile("blocked.pipe")).toThrow("path must be a file");
-  });
-
-  it("enforces a cumulative session scratch limit", async () => {
-    const limitedWorkspace = new WorkspaceSandbox(root, tmpdir(), 16 * 1_024);
-    const limitedProcesses = new SandboxedProcessManager(limitedWorkspace);
+describe("Codex command process", () => {
+  it("inherits environment access and can use host paths and loopback network", async () => {
+    const server = createServer((_request, response) => response.end("network-ok"));
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("test server has no port");
+    const previous = process.env["PI_CODE_MODE_TEST_ENV"];
+    process.env["PI_CODE_MODE_TEST_ENV"] = "environment-ok";
     try {
-      const result = await limitedProcesses.exec({
-        cmd: 'for name in one two three; do head -c 8192 /dev/zero > "$TMPDIR/$name"; done',
-        yield_time_ms: 2_000,
+      const result = await processes.exec({
+        cmd: `printf '%s\\n' "$PI_CODE_MODE_TEST_ENV"
+head -n 1 /etc/passwd
+node -e 'fetch("http://127.0.0.1:${String(address.port)}").then(async response => console.log(await response.text()))'`,
+        yield_time_ms: 5_000,
       });
-
-      expect(result.exit_code).toBe(1);
-      expect(result.output).toContain("session scratch exceeds the 16384-byte limit");
-      expect(limitedWorkspace.scratchUsage().bytes).toBeGreaterThan(16 * 1_024);
-      await expect(
-        limitedWorkspace.writeFile("/tmp/four", Buffer.alloc(4 * 1_024)),
-      ).rejects.toThrow("session scratch exceeds");
+      expect(result.exit_code).toBe(0);
+      expect(result.output).toContain("environment-ok");
+      expect(result.output).toContain("root:");
+      expect(result.output).toContain("network-ok");
     } finally {
-      limitedProcesses.close();
-      limitedWorkspace.close();
+      if (previous === undefined) delete process.env["PI_CODE_MODE_TEST_ENV"];
+      else process.env["PI_CODE_MODE_TEST_ENV"] = previous;
+      await new Promise((resolve, reject) => {
+        server.close((error) => (error === undefined ? resolve() : reject(error)));
+      });
     }
   });
 
-  it("uses the private scratch directory as a command workdir", async () => {
-    const result = await processes.exec({
-      cmd: "pwd; printf scratch > command-scratch.txt",
-      workdir: "/tmp",
-      yield_time_ms: 2_000,
-    });
-
-    expect(result.exit_code).toBe(0);
-    expect(result.output.trim()).toBe(workspace.scratch);
-    expect(workspace.readFile("/tmp/command-scratch.txt").toString()).toBe("scratch");
+  it("uses normal temporary directories without a private quota", async () => {
+    const temporary = mkdtempSync(join(tmpdir(), "pi-code-mode-command-temp-"));
+    try {
+      const result = await processes.exec({
+        cmd: "truncate -s 300M large.bin; stat -c %s large.bin",
+        workdir: temporary,
+        yield_time_ms: 2_000,
+      });
+      expect(result.exit_code).toBe(0);
+      expect(result.output.trim()).toBe(String(300 * 1024 * 1024));
+      expect(statSync(join(temporary, "large.bin")).size).toBe(300 * 1024 * 1024);
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
   });
 
-  it("yields a process, writes standard input, and returns only new output", async () => {
+  it("does not terminate detached background work when the session closes", async () => {
+    const marker = join(root, "background-finished.txt");
+    const result = await processes.exec({
+      cmd: `setsid sh -c 'sleep 0.4; printf survived > "${marker}"' >/dev/null 2>&1 &`,
+      yield_time_ms: 2_000,
+    });
+    expect(result.exit_code).toBe(0);
+    processes.close();
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(readFileSync(marker, "utf8")).toBe("survived");
+  });
+
+  it("yields, accepts input, supports PTYs, and preserves split UTF-8", async () => {
     const initial = await processes.exec({
       cmd: 'printf "ready\\n"; read line; printf "got:%s\\n" "$line"',
       yield_time_ms: 250,
     });
     expect(initial.session_id).toBeTypeOf("number");
     expect(initial.output).toContain("ready");
-
     const completed = await processes.write({
       session_id: initial.session_id,
       chars: "hello\n",
       yield_time_ms: 2_000,
     });
-    expect(completed.exit_code).toBe(0);
-    expect(completed.output).toBe("got:hello\n");
-  });
+    expect(completed).toMatchObject({ exit_code: 0, output: "got:hello\n" });
 
-  it("preserves UTF-8 characters split across output chunks", async () => {
-    const result = await processes.exec({
+    const utf8 = await processes.exec({
       cmd: `python3 - <<'PY'
 import os
 import time
@@ -362,29 +237,23 @@ os.write(1, b"\\xac")
 PY`,
       yield_time_ms: 2_000,
     });
+    expect(utf8).toMatchObject({ exit_code: 0, output: "€" });
 
-    expect(result.exit_code).toBe(0);
-    expect(result.output).toBe("€");
-  });
-
-  it("relays standard input through a broker-owned PTY", async () => {
-    const initial = await processes.exec({
+    const tty = await processes.exec({
       cmd: 'read line; printf "pty:%s\\n" "$line"',
       tty: true,
       yield_time_ms: 250,
     });
-    expect(initial.session_id).toBeTypeOf("number");
-
-    const completed = await processes.write({
-      session_id: initial.session_id,
+    const ttyCompleted = await processes.write({
+      session_id: tty.session_id,
       chars: "hello\n",
       yield_time_ms: 2_000,
     });
-    expect(completed.exit_code).toBe(0);
-    expect(completed.output).toContain("pty:hello");
+    expect(ttyCompleted.exit_code).toBe(0);
+    expect(ttyCompleted.output).toContain("pty:hello");
   });
 
-  it("truncates output and covers TTY, abort, and closed-session handling", async () => {
+  it("keeps output bounds and kills an explicitly cancelled command tree", async () => {
     const truncated = await processes.exec({
       cmd: "python3 -c 'print(\"x\" * 100)'",
       max_output_tokens: 1,
@@ -393,42 +262,28 @@ PY`,
     expect(truncated.output).toContain("output truncated");
     expect(truncated.original_token_count).toBeGreaterThan(1);
 
-    const noisy = await processes.exec({
-      cmd: "yes output",
-      max_output_tokens: 100,
-      yield_time_ms: 2_000,
-    });
-    expect(noisy.exit_code).toBeTypeOf("number");
-    expect(noisy.output).toContain("command terminated after exceeding");
-
-    const tty = await processes.exec({ cmd: "printf tty", tty: true, yield_time_ms: 2_000 });
-    expect(tty.output).toBe("tty");
-    expect(tty.exit_code).toBe(0);
-
+    const pidFile = join(root, "cancelled.pid");
     const controller = new AbortController();
-    controller.abort();
+    const timer = setTimeout(() => controller.abort(), 100);
     await expect(
-      processes.exec({ cmd: "printf aborted > should-not-exist.txt" }, controller.signal),
+      processes.exec(
+        {
+          cmd: `trap '' TERM
+printf '%s' "$$" > "${pidFile}"
+while :; do sleep 1; done`,
+          yield_time_ms: 30_000,
+        },
+        controller.signal,
+      ),
     ).rejects.toThrow();
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(workspace.exists("should-not-exist.txt")).toBe(false);
-
-    const running = await processes.exec({ cmd: "sleep 0.4", yield_time_ms: 250 });
-    expect(running.session_id).toBeTypeOf("number");
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    await expect(
-      processes.write({ session_id: running.session_id, chars: "late" }),
-    ).rejects.toThrow("already exited");
-    const finished = await processes.write({
-      session_id: running.session_id,
-      chars: "",
-      yield_time_ms: 250,
-    });
-    expect(finished.exit_code).toBe(0);
+    globalThis.clearTimeout(timer);
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    expect(() => process.kill(pid, 0)).toThrow();
   });
 
-  it("limits active commands and stops commands at their wall-clock deadline", async () => {
-    const limited = new SandboxedProcessManager(workspace, {
+  it("supports explicit active-process and wall-time bounds", async () => {
+    const limited = new ProcessManager(root, {
       maxActiveProcesses: 1,
       wallTimeLimitMs: 750,
     });
@@ -438,72 +293,15 @@ PY`,
       await expect(limited.exec({ cmd: "sleep 10", yield_time_ms: 250 })).rejects.toThrow(
         "at most 1 active processes",
       );
-
-      await new Promise((resolve) => setTimeout(resolve, 600));
+      await new Promise((resolve) => setTimeout(resolve, 2_300));
       const finished = await limited.write({
         session_id: running.session_id,
         chars: "",
-        yield_time_ms: 2_000,
+        yield_time_ms: 250,
       });
       expect(finished.exit_code).toBeTypeOf("number");
     } finally {
       limited.close();
-    }
-  });
-
-  it("bounds completed command records that are never polled", async () => {
-    const sessionIds = [];
-    for (const count of [8, 8, 1]) {
-      const batch = await Promise.all(
-        Array.from({ length: count }, () =>
-          processes.exec({ cmd: "sleep 0.4", yield_time_ms: 250 }),
-        ),
-      );
-      sessionIds.push(...batch.map((result) => result.session_id));
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-
-    expect(sessionIds).toHaveLength(17);
-    await expect(
-      processes.write({ session_id: sessionIds[0], chars: "", yield_time_ms: 250 }),
-    ).rejects.toThrow("unknown command session");
-    const retained = await processes.write({
-      session_id: sessionIds.at(-1),
-      chars: "",
-      yield_time_ms: 250,
-    });
-    expect(retained.exit_code).toBe(0);
-  });
-
-  it("escalates shutdown to kill a command tree that ignores SIGTERM", async () => {
-    const guarded = new SandboxedProcessManager(workspace, { wallTimeLimitMs: 10_000 });
-    let commandPid;
-    const isAlive = () => {
-      if (commandPid === undefined) return false;
-      try {
-        process.kill(commandPid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    };
-    try {
-      const running = await guarded.exec({
-        cmd: `trap '' TERM
-printf '%s\\n' "$$"
-while :; do sleep 1; done`,
-        yield_time_ms: 250,
-      });
-      commandPid = Number(running.output.trim());
-      expect(commandPid).toBeGreaterThan(1);
-      expect(isAlive()).toBe(true);
-
-      guarded.close();
-      await new Promise((resolve) => setTimeout(resolve, 2_300));
-      expect(isAlive()).toBe(false);
-    } finally {
-      guarded.close();
-      if (isAlive()) process.kill(commandPid, "SIGKILL");
     }
   });
 
@@ -530,41 +328,6 @@ while :; do sleep 1; done`,
     processes.close();
     processes.close();
     await expect(processes.exec({ cmd: "true" })).rejects.toThrow("closed");
-  });
-
-  it("allows normal Git metadata and blocks embedded Git credentials", async () => {
-    mkdirSync(join(root, ".git"));
-    writeFileSync(
-      join(root, ".git", "config"),
-      '[remote "origin"]\n\turl = https://github.com/osolmaz/pi-code-mode.git\n',
-    );
-    expect(workspace.readFile(".git/config").toString()).toContain("github.com");
-    await expect(processes.exec({ cmd: "true", yield_time_ms: 2_000 })).resolves.toMatchObject({
-      exit_code: 0,
-    });
-
-    writeFileSync(
-      join(root, ".git", "config"),
-      '[remote "origin"]\n\turl = https://secret-token@github.com/osolmaz/private.git\n',
-    );
-    expect(() => workspace.readFile(".git/config")).toThrow("credential-bearing Git");
-    await expect(processes.exec({ cmd: "true" })).rejects.toThrow(
-      "credential-bearing Git configuration",
-    );
-  });
-
-  it("refuses commands while a sensitive workspace path exists", async () => {
-    mkdirSync(join(root, "node_modules", "package"), { recursive: true });
-    writeFileSync(join(root, "node_modules", "package", ".env"), "SECRET=value\n");
-    await expect(processes.exec({ cmd: "true" })).rejects.toThrow("node_modules/package/.env");
-  });
-
-  it("blocks certificate and private-key file suffixes", async () => {
-    mkdirSync(join(root, "certificates"));
-    writeFileSync(join(root, "certificates", "deploy.PEM"), "credential\n");
-
-    expect(() => workspace.readFile("certificates/deploy.PEM")).toThrow("sensitive path");
-    await expect(processes.exec({ cmd: "true" })).rejects.toThrow("certificates/deploy.PEM");
   });
 });
 

@@ -1,7 +1,7 @@
 # Pi Code Mode
 
 Pi Code Mode is a Code Mode extension and standalone Pi harness.
-It lets a compatible model write JavaScript that reads and changes files, applies patches, runs sandboxed commands, and combines many tool calls without placing each intermediate result in model context.
+It lets a compatible model write JavaScript that reads and changes files, applies patches, runs commands, and combines many tool calls without placing each intermediate result in model context.
 
 ## Requirements
 
@@ -37,7 +37,7 @@ Each session records its mode and tool set. Resuming or branching a session rest
 
 Codex mode provides these functions inside JavaScript:
 
-- `tools.exec_command` runs a sandboxed command and returns output or a numeric session ID;
+- `tools.exec_command` runs a local command and returns output or a numeric session ID;
 - `tools.write_stdin` sends input to a running command or polls it;
 - `tools.apply_patch` applies a Codex patch as one transaction.
 
@@ -82,7 +82,7 @@ Pi mode mirrors the active vanilla Pi built-ins for that session. A normal sessi
 - `tools.edit`;
 - `tools.write`.
 
-If the matching vanilla Pi built-ins are active when the session starts, Pi Code Mode can also provide `powershell`, `grep`, `find`, and `ls`. The optional `powershell` tool reports a clear error when `pwsh` is missing or cannot start within the command sandbox. Pi mode keeps Pi's names, input schemas, result objects, errors, and one-shot shell behavior. Codex process-session controls do not appear in Pi mode. Large Bash output uses Pi's display limits, but earlier output is discarded instead of being saved in the operating system's temporary directory.
+If the matching vanilla Pi built-ins are active when the session starts, Pi Code Mode can also provide `powershell`, `grep`, `find`, and `ls`. Pi mode creates these tools with Pi's public built-in tool factories. It keeps Pi's names, input schemas, result objects, errors, paths, command environment, network access, output handling, and one-shot shell behavior. Codex process-session controls do not appear in Pi mode.
 
 ## JavaScript cells
 
@@ -158,33 +158,15 @@ The config file is `$XDG_CONFIG_HOME/pi-code-mode/config.json`, or `~/.config/pi
 
 The standalone harness uses Pi's standard editor, transcript, selectors, slash commands, session controls, themes, and key bindings. It keeps its settings and session history under the `pi-code-mode` config directory. It does not load normal Pi extensions, skills, prompt templates, or project instruction files.
 
-## Sandbox
+## Permissions
 
-JavaScript runs in a separate Rust `deno_core` and V8 process. Landlock and seccomp deny direct host files, network sockets, tracing, mounts, namespace changes, BPF, user-fault handling, and io_uring setup. The host fails closed if Linux cannot enforce these controls.
+JavaScript runs in a separate Rust `deno_core` and V8 process. Landlock and seccomp keep that host from using files, network sockets, subprocesses, tracing, mounts, namespaces, BPF, user-fault handling, or io_uring directly. All effects still go through the named functions under `tools`.
 
-Nested commands run in separate restricted workers. They have:
+The nested coding tools use the parent Pi process and calling harness permissions. Pi mode delegates to Pi's built-in tool factories. Codex-mode commands inherit the parent command environment and can use normal filesystem paths, network access, home directory, temporary directory, and background processes. Pi Code Mode does not add a private workspace view, credential-path filter, network block, scratch quota, command memory cap, or session-end cleanup for detached background processes.
 
-- the selected workspace as their only writable project directory;
-- an empty inherited environment and a private `HOME` and `TMPDIR`;
-- no network sockets;
-- no access to the user's real home or credentials;
-- CPU, memory, file-size, open-file, process, output, and lifetime limits;
-- termination after 8 MiB of total command output;
-- at most eight active command workers per harness by default;
-- bounded, expiring records for completed commands that the model does not poll;
-- trusted worker configuration sent through a private pipe rather than command-writable files;
-- a 30-minute wall-clock limit for each command by default;
-- process-group cleanup with `SIGKILL` escalation two seconds after cancellation or session shutdown;
-- seccomp denial of `setsid` and `setpgid`, so descendants cannot leave that process group;
-- broker-owned PTY descriptors for TTY commands, without access to the host's `/dev/pts` tree.
+This behavior matches normal local coding tools, so a model can reach the same files, network, and credentials that those tools can reach. Use a container, operating-system sandbox, restricted account, or other harness policy when the model must have fewer permissions.
 
-The file tools map `/tmp` to private session scratch space. Sandboxed commands receive the same directory through `TMPDIR`. Scratch has a 256 MiB and 50,000-entry session limit by default. Broker writes check this limit before writing, and the process manager checks command writes while commands run and when they exit.
-
-File operations walk from stable workspace or scratch directory descriptors with no-follow checks, so a running command cannot redirect a broker write through a symlink race. Parent-process file reads use nonblocking opens, reject special files, and reject regular files larger than 16 MiB before allocation. Optional Pi grep runs the existing `rg` binary inside the command sandbox, so generated regular expressions do not run in Pi's Node.js process.
-
-Commands fail closed when the workspace contains a common credential path such as `.env`, `.ssh`, `.aws`, `.npmrc`, or a token or credentials file. Git metadata remains usable, but direct reads and commands fail when `.git/config`, nested Git config, or `.gitmodules` contains URL user information, authorization headers, or token and password fields. Remove sensitive data from the test workspace before you let an untrusted model run commands.
-
-Pi Code Mode records the selected session contract and nested side-effect metadata in the Pi session. It keeps results for unsafe nested call IDs in memory for the active session, so replaying a completed top-level call does not repeat its writes or commands. It does not use a blanket approval prompt. Use a small, non-sensitive workspace when you test a model you do not trust.
+Pi Code Mode records the selected session contract and nested side-effect metadata in the Pi session. It keeps results for unsafe nested call IDs in memory for the active session, so replaying a completed top-level call does not repeat its writes or commands. Active calls still support cancellation, and model-visible output remains bounded.
 
 ## Design
 

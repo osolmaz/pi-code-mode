@@ -7,8 +7,6 @@ use rustix::fd::OwnedFd;
 use rustix::pty::{OpenptFlags, grantpt, ioctl_tiocgptpeer, openpt, unlockpt};
 use serde::Deserialize;
 
-use crate::sandbox;
-
 const MAX_CONFIG_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Deserialize)]
@@ -16,14 +14,7 @@ const MAX_CONFIG_BYTES: usize = 2 * 1024 * 1024;
 struct CommandConfig {
     command: String,
     cwd: String,
-    workspace: String,
-    scratch: String,
     tty: bool,
-    cpu_limit_seconds: u64,
-    memory_limit_bytes: u64,
-    file_size_limit_bytes: u64,
-    open_file_limit: u64,
-    process_limit: u64,
 }
 
 struct PseudoTerminal {
@@ -35,45 +26,21 @@ pub fn run() -> anyhow::Result<()> {
     let config = read_config()?;
     validate_config(&config)?;
     let pty = config.tty.then(open_pseudo_terminal).transpose()?;
-    sandbox::apply_command_sandbox(&config.workspace, &config.scratch)?;
-
-    let command = restricted_command(&config);
+    let command = native_command(&config);
     let status = if let Some(pty) = pty {
         run_with_pseudo_terminal(command, pty)?
     } else {
         let mut command = command;
-        command
-            .status()
-            .context("failed to run sandboxed command")?
+        command.status().context("failed to run command")?
     };
     std::process::exit(status.code().unwrap_or(128));
 }
 
-fn restricted_command(config: &CommandConfig) -> Command {
-    let mut command = Command::new("/usr/bin/prlimit");
-    command.args([
-        format!("--cpu={}", config.cpu_limit_seconds),
-        format!("--as={}", config.memory_limit_bytes),
-        format!("--fsize={}", config.file_size_limit_bytes),
-        format!("--nofile={}", config.open_file_limit),
-        format!("--nproc={}", config.process_limit),
-        "--".to_owned(),
-        "/bin/bash".to_owned(),
-        "--noprofile".to_owned(),
-        "--norc".to_owned(),
-        "-lc".to_owned(),
-        config.command.clone(),
-    ]);
+fn native_command(config: &CommandConfig) -> Command {
+    let mut command = Command::new("/bin/bash");
     command
-        .current_dir(&config.cwd)
-        .env_clear()
-        .env("HOME", &config.scratch)
-        .env("TMPDIR", &config.scratch)
-        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-        .env("LANG", "C.UTF-8")
-        .env("LC_ALL", "C.UTF-8")
-        .env("SHELL", "/bin/bash")
-        .env("TERM", if config.tty { "xterm-256color" } else { "dumb" });
+        .args(["--noprofile", "--norc", "-lc", &config.command])
+        .current_dir(&config.cwd);
     command
 }
 
@@ -98,9 +65,7 @@ fn run_with_pseudo_terminal(
         .stdout(Stdio::from(child_output))
         .stderr(Stdio::from(child_error));
 
-    let mut child = command
-        .spawn()
-        .context("failed to run sandboxed PTY command")?;
+    let mut child = command.spawn().context("failed to run PTY command")?;
     drop(command);
     let mut controller_writer =
         File::from(rustix::io::dup(&pty.controller).context("failed to copy PTY controller")?);
@@ -154,11 +119,9 @@ fn validate_config(config: &CommandConfig) -> anyhow::Result<()> {
     if config.command.is_empty() {
         bail!("command must not be empty");
     }
-    let workspace = std::fs::canonicalize(&config.workspace).context("invalid workspace path")?;
-    let scratch = std::fs::canonicalize(&config.scratch).context("invalid scratch path")?;
     let cwd = std::fs::canonicalize(&config.cwd).context("invalid command working directory")?;
-    if !cwd.starts_with(&workspace) && !cwd.starts_with(&scratch) {
-        bail!("command working directory is outside the sandbox");
+    if !cwd.is_dir() {
+        bail!("command working directory is not a directory");
     }
     Ok(())
 }

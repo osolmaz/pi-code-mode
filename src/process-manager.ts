@@ -1,10 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { statSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 
-import { resolveHostBinary } from "../host/binary.js";
-import type { WorkspaceSandbox } from "./workspace.js";
+import { resolveHostBinary } from "./host/binary.js";
 
 const DEFAULT_EXEC_YIELD_MS = 10_000;
 const DEFAULT_POLL_MS = 5_000;
@@ -14,11 +14,9 @@ const MAX_YIELD_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
 const MAX_MAX_OUTPUT_TOKENS = 100_000;
 const MAX_TOTAL_OUTPUT_BYTES = 8 * 1024 * 1024;
-const SCRATCH_CHECK_INTERVAL_MS = 25;
 const MAX_INPUT_BYTES = 1024 * 1024;
-const DEFAULT_WALL_TIME_LIMIT_MS = 30 * 60 * 1_000;
 const MAX_WALL_TIME_LIMIT_MS = 24 * 60 * 60 * 1_000;
-const DEFAULT_MAX_ACTIVE_PROCESSES = 8;
+const DEFAULT_MAX_ACTIVE_PROCESSES = 64;
 const MAX_ACTIVE_PROCESSES = 64;
 const COMPLETED_PROCESS_RETENTION_MS = 60_000;
 const MAX_COMPLETED_PROCESSES = 16;
@@ -69,16 +67,19 @@ type ManagedProcess = {
   outputListeners: Set<(data: Buffer) => void>;
 };
 
-export type SandboxedProcessManagerOptions = {
+export type ProcessManagerOptions = {
   hostBinary?: string;
-  cpuLimitSeconds?: number;
-  memoryLimitBytes?: number;
-  fileSizeLimitBytes?: number;
-  openFileLimit?: number;
-  processLimit?: number;
   wallTimeLimitMs?: number;
   maxActiveProcesses?: number;
 };
+
+type ResolvedProcessManagerOptions = {
+  hostBinary: string;
+  wallTimeLimitMs?: number;
+  maxActiveProcesses: number;
+};
+
+type Unrefable = { unref: () => void };
 
 function boundedInteger(
   value: unknown,
@@ -92,27 +93,6 @@ function boundedInteger(
     throw new Error(`${field} must be an integer from ${String(minimum)} to ${String(maximum)}`);
   }
   return value as number;
-}
-
-// Linux counts every user thread against RLIMIT_NPROC, including threads outside this process.
-// eslint-disable-next-line complexity
-function currentUserProcessLimit(headroom = 64): number {
-  if (process.platform !== "linux" || process.getuid === undefined) return 512;
-  const uid = process.getuid();
-  let count = 0;
-  for (const entry of readdirSync("/proc")) {
-    if (!/^\d+$/u.test(entry)) continue;
-    try {
-      const status = readFileSync(`/proc/${entry}/status`, "utf8");
-      const match = /^Uid:\s+(\d+)/mu.exec(status);
-      if (match?.[1] !== undefined && Number(match[1]) === uid) {
-        count += readdirSync(`/proc/${entry}/task`).length;
-      }
-    } catch {
-      continue;
-    }
-  }
-  return Math.max(128, count + headroom);
 }
 
 function tokenLimit(value: number | undefined): number {
@@ -144,34 +124,30 @@ function outputSlice(
   };
 }
 
-export class SandboxedProcessManager {
-  readonly #workspace: WorkspaceSandbox;
-  readonly #options: Required<SandboxedProcessManagerOptions>;
+export class ProcessManager {
+  readonly #root: string;
+  readonly #options: ResolvedProcessManagerOptions;
   readonly #processes = new Map<number, ManagedProcess>();
-  readonly #scratchTimer: NodeJS.Timeout;
   #nextId = 1;
   #closed = false;
-  #scratchLimitExceeded = false;
 
-  constructor(workspace: WorkspaceSandbox, options: SandboxedProcessManagerOptions = {}) {
-    this.#workspace = workspace;
+  constructor(root: string, options: ProcessManagerOptions = {}) {
+    this.#root = resolve(root);
+    if (!statSync(this.#root).isDirectory())
+      throw new Error("working directory must be a directory");
     this.#options = {
       hostBinary: options.hostBinary ?? resolveHostBinary(),
-      cpuLimitSeconds: options.cpuLimitSeconds ?? 300,
-      memoryLimitBytes: options.memoryLimitBytes ?? 2 * 1024 * 1024 * 1024,
-      fileSizeLimitBytes: Math.min(
-        options.fileSizeLimitBytes ?? 1024 * 1024 * 1024,
-        workspace.maxScratchBytes,
-      ),
-      openFileLimit: options.openFileLimit ?? 256,
-      processLimit: options.processLimit ?? currentUserProcessLimit(),
-      wallTimeLimitMs: boundedInteger(
-        options.wallTimeLimitMs,
-        DEFAULT_WALL_TIME_LIMIT_MS,
-        MIN_YIELD_MS,
-        MAX_WALL_TIME_LIMIT_MS,
-        "wallTimeLimitMs",
-      ),
+      ...(options.wallTimeLimitMs === undefined
+        ? {}
+        : {
+            wallTimeLimitMs: boundedInteger(
+              options.wallTimeLimitMs,
+              options.wallTimeLimitMs,
+              MIN_YIELD_MS,
+              MAX_WALL_TIME_LIMIT_MS,
+              "wallTimeLimitMs",
+            ),
+          }),
       maxActiveProcesses: boundedInteger(
         options.maxActiveProcesses,
         DEFAULT_MAX_ACTIVE_PROCESSES,
@@ -180,19 +156,13 @@ export class SandboxedProcessManager {
         "maxActiveProcesses",
       ),
     };
-    this.#scratchTimer = setInterval(() => {
-      if ([...this.#processes.values()].some((process) => !process.closed)) {
-        this.#enforceScratchLimit();
-      }
-    }, SCRATCH_CHECK_INTERVAL_MS);
-    this.#scratchTimer.unref();
   }
 
   async exec(input: ExecCommandInput, signal?: AbortSignal): Promise<CommandResult> {
     return this.#exec(input, signal);
   }
 
-  // Command validation keeps each option and sandbox preflight independent.
+  // Command validation keeps each option and working-directory check independent.
   // eslint-disable-next-line complexity
   async #exec(
     input: ExecCommandInput,
@@ -209,13 +179,12 @@ export class SandboxedProcessManager {
       throw new Error("only the bash shell is available");
     }
     if (input.login === true) throw new Error("login shells are not available");
-    this.#workspace.assertCommandSafe();
-    this.#workspace.assertScratchWithinLimit();
-    const workdir = this.#workspace.resolve(input.workdir ?? ".");
-    if (!this.#workspace.stat(workdir.absolute).isDirectory()) {
-      throw new Error("workdir must be a directory");
-    }
-    const managed = this.#spawn(input.cmd, workdir.absolute, input.tty ?? false, onData);
+    const requestedWorkdir = input.workdir ?? ".";
+    const workdir = isAbsolute(requestedWorkdir)
+      ? resolve(requestedWorkdir)
+      : resolve(this.#root, requestedWorkdir);
+    if (!statSync(workdir).isDirectory()) throw new Error("workdir must be a directory");
+    const managed = this.#spawn(input.cmd, workdir, input.tty ?? false, onData);
     const onAbort = (): void => {
       this.#terminate(managed);
     };
@@ -234,41 +203,6 @@ export class SandboxedProcessManager {
       return this.#result(managed, tokenLimit(input.max_output_tokens));
     } finally {
       signal?.removeEventListener("abort", onAbort);
-    }
-  }
-
-  // Pi one-shot commands combine timeout conversion, streaming polls, and Pi error mapping.
-  // eslint-disable-next-line complexity
-  async runOneShot(
-    command: string,
-    cwd: string,
-    options: { onData: (data: Buffer) => void; signal?: AbortSignal; timeout?: number },
-  ): Promise<{ exitCode: number | null }> {
-    const timeoutSignal =
-      options.timeout === undefined
-        ? undefined
-        : AbortSignal.timeout(Math.max(1, options.timeout * 1_000));
-    const signals = [options.signal, timeoutSignal].filter(
-      (signal): signal is AbortSignal => signal !== undefined,
-    );
-    const signal = signals.length === 0 ? undefined : AbortSignal.any(signals);
-    try {
-      let result = await this.#exec(
-        { cmd: command, workdir: cwd, tty: false, yield_time_ms: MAX_YIELD_MS },
-        signal,
-        options.onData,
-      );
-      while (result.session_id !== undefined) {
-        result = await this.write(
-          { session_id: result.session_id, chars: "", yield_time_ms: MAX_YIELD_MS },
-          signal,
-        );
-      }
-      return { exitCode: result.exit_code ?? null };
-    } catch (error) {
-      if (options.signal?.aborted === true) throw new Error("aborted");
-      if (timeoutSignal?.aborted === true) throw new Error(`timeout:${String(options.timeout)}`);
-      throw error;
     }
   }
 
@@ -314,10 +248,14 @@ export class SandboxedProcessManager {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    clearInterval(this.#scratchTimer);
     for (const process of this.#processes.values()) {
       if (process.evictionTimer !== undefined) clearTimeout(process.evictionTimer);
-      this.#terminate(process);
+      if (process.lifetimeTimer !== undefined) clearTimeout(process.lifetimeTimer);
+      process.outputListeners.clear();
+      process.child.unref();
+      for (const stream of [process.child.stdin, process.child.stdout, process.child.stderr]) {
+        (stream as unknown as Unrefable).unref();
+      }
     }
     this.#processes.clear();
   }
@@ -333,25 +271,14 @@ export class SandboxedProcessManager {
     ).length;
     if (activeProcesses >= this.#options.maxActiveProcesses) {
       throw new Error(
-        `command sandbox allows at most ${String(this.#options.maxActiveProcesses)} active processes`,
+        `Code Mode allows at most ${String(this.#options.maxActiveProcesses)} active processes`,
       );
     }
     const id = this.#nextId++;
-    const config = JSON.stringify({
-      command,
-      cwd,
-      workspace: this.#workspace.root,
-      scratch: this.#workspace.scratch,
-      tty,
-      cpuLimitSeconds: this.#options.cpuLimitSeconds,
-      memoryLimitBytes: this.#options.memoryLimitBytes,
-      fileSizeLimitBytes: this.#options.fileSizeLimitBytes,
-      openFileLimit: this.#options.openFileLimit,
-      processLimit: this.#options.processLimit,
-    });
+    const config = JSON.stringify({ command, cwd, tty });
     const child = spawn(this.#options.hostBinary, ["--command-worker"], {
       cwd: "/",
-      env: {},
+      env: process.env,
       detached: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -371,9 +298,11 @@ export class SandboxedProcessManager {
       outputListeners: new Set(onData === undefined ? [] : [onData]),
     };
     this.#processes.set(id, managed);
-    managed.lifetimeTimer = setTimeout(() => {
-      this.#terminate(managed);
-    }, this.#options.wallTimeLimitMs);
+    if (this.#options.wallTimeLimitMs !== undefined) {
+      managed.lifetimeTimer = setTimeout(() => {
+        this.#terminate(managed);
+      }, this.#options.wallTimeLimitMs);
+    }
     child.stdout.on("data", (chunk: Buffer) => {
       this.#append(managed, chunk, managed.stdoutDecoder);
     });
@@ -383,22 +312,11 @@ export class SandboxedProcessManager {
     child.once("error", (error) => {
       this.#append(managed, Buffer.from(`command worker failed: ${error.message}\n`));
     });
-    child.once("exit", () => {
-      // The worker can exit while a background descendant keeps its inherited pipes open.
-      // Kill the group on worker exit so Node can deliver close and release the command slot.
-      this.#signalGroup(managed, "SIGKILL");
-    });
     child.once("close", (code, signal) => {
-      // A background descendant can close every inherited pipe and outlive the worker. Session
-      // creation and process-group changes are denied, so one final group kill removes it before
-      // this command is reported as complete.
-      this.#signalGroup(managed, "SIGKILL");
       this.#flushOutputDecoders(managed);
-      const scratchExceeded = this.#enforceScratchLimit();
       managed.closed = true;
-      managed.exitCode = scratchExceeded ? 1 : (code ?? (signal === null ? 1 : 128));
+      managed.exitCode = code ?? (signal === null ? 1 : 128);
       if (managed.lifetimeTimer !== undefined) clearTimeout(managed.lifetimeTimer);
-      if (managed.terminationTimer !== undefined) clearTimeout(managed.terminationTimer);
       managed.outputListeners.clear();
       this.#retainCompleted(managed);
     });
@@ -497,25 +415,6 @@ export class SandboxedProcessManager {
     this.#processes.delete(id);
   }
 
-  #enforceScratchLimit(): boolean {
-    try {
-      this.#workspace.assertScratchWithinLimit();
-      this.#scratchLimitExceeded = false;
-      return false;
-    } catch (error) {
-      if (this.#scratchLimitExceeded) return true;
-      this.#scratchLimitExceeded = true;
-      const message = error instanceof Error ? error.message : String(error);
-      const notice = Buffer.from(`\n[command terminated: ${message}]\n`);
-      for (const process of this.#processes.values()) {
-        if (process.closed) continue;
-        this.#append(process, notice);
-        this.#terminate(process);
-      }
-      return true;
-    }
-  }
-
   #signalGroup(process: ManagedProcess, signal: NodeJS.Signals): void {
     const pid = process.child.pid;
     if (pid === undefined) {
@@ -540,6 +439,6 @@ export class SandboxedProcessManager {
   }
 
   #assertOpen(): void {
-    if (this.#closed) throw new Error("command sandbox is closed");
+    if (this.#closed) throw new Error("process manager is closed");
   }
 }

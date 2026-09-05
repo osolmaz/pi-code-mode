@@ -2,8 +2,7 @@ use anyhow::{Context, bail};
 
 #[cfg(target_os = "linux")]
 use landlock::{
-    ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetStatus, path_beneath_rules,
+    ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetStatus,
 };
 #[cfg(target_os = "linux")]
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
@@ -61,66 +60,6 @@ pub fn apply_seccomp() -> anyhow::Result<()> {
         libc::SYS_bpf,
         libc::SYS_userfaultfd,
         libc::SYS_io_uring_setup,
-    ])
-}
-
-#[cfg(target_os = "linux")]
-pub fn apply_command_sandbox(workspace: &str, scratch: &str) -> anyhow::Result<()> {
-    let abi = ABI::V4;
-    let read_paths = [
-        "/bin",
-        "/usr",
-        "/lib",
-        "/lib64",
-        "/etc/alternatives",
-        "/etc/ld.so.cache",
-        "/opt/microsoft/powershell",
-        "/dev/null",
-        "/dev/urandom",
-        "/dev/zero",
-    ]
-    .into_iter()
-    .filter(|path| std::path::Path::new(path).exists());
-    // Landlock's read set includes EXECUTE, READ_FILE, and READ_DIR.
-    // This lets the worker start allowlisted binaries without granting filesystem writes.
-    let command_read_access = AccessFs::from_read(abi);
-    // PTY descriptors are allocated by the trusted worker before Landlock is applied. Commands
-    // inherit only those descriptors and never receive access to the host's /dev/pts tree.
-    let write_paths = [workspace, scratch, "/dev/null"]
-        .into_iter()
-        .filter(|path| std::path::Path::new(path).exists());
-    let status = Ruleset::default()
-        .handle_access(AccessFs::from_all(abi))
-        .context("failed to select command filesystem rights")?
-        .handle_access(AccessNet::from_all(abi))
-        .context("failed to select command network rights")?
-        .create()
-        .context("failed to create the command ruleset")?
-        .add_rules(path_beneath_rules(read_paths, command_read_access))
-        .context("failed to add command read rules")?
-        .add_rules(path_beneath_rules(write_paths, AccessFs::from_all(abi)))
-        .context("failed to add command write rules")?
-        .set_compatibility(CompatLevel::HardRequirement)
-        .restrict_self()
-        .context("failed to apply the command Landlock ruleset")?;
-    if status.ruleset != RulesetStatus::FullyEnforced || !status.no_new_privs {
-        bail!("the command Landlock sandbox was not fully enforced: {status:?}");
-    }
-    apply_seccomp_denials([
-        libc::SYS_socket,
-        libc::SYS_socketpair,
-        libc::SYS_ptrace,
-        libc::SYS_bpf,
-        libc::SYS_userfaultfd,
-        libc::SYS_io_uring_setup,
-        libc::SYS_mount,
-        libc::SYS_umount2,
-        libc::SYS_pivot_root,
-        libc::SYS_chroot,
-        libc::SYS_setns,
-        libc::SYS_unshare,
-        libc::SYS_setsid,
-        libc::SYS_setpgid,
     ])
 }
 

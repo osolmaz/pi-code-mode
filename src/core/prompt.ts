@@ -39,11 +39,11 @@ export function codeModeSystemPrompt(
 ): string {
   const behavior =
     contract.mode === "codex"
-      ? "Use exec_command for sandboxed workspace commands, write_stdin for a running command, and apply_patch for precise file changes."
+      ? "Use exec_command for local commands, write_stdin for a running command, and apply_patch for precise workspace file changes."
       : "Use the active vanilla Pi built-ins through tools. Their names, inputs, and results follow Pi's normal tool contracts.";
   return `You are working in Code Mode (${contract.mode} mode). The only model-visible tools are exec and wait.
 
-Use exec to write a JavaScript program that calls the available functions under tools. ${behavior} Send raw JavaScript, compose tool calls inside the program, and emit the useful final result with text(value). Use wait only when exec returns a waiting cell. Commands have no network or credential access and can access only the workspace and the private session /tmp.
+Use exec to write a JavaScript program that calls the available functions under tools. ${behavior} Send raw JavaScript, compose tool calls inside the program, and emit the useful final result with text(value). Use wait only when exec returns a waiting cell. Nested coding tools use the parent Pi process and calling harness permissions.
 
 Available functions:
 ${toolLines(descriptors)}`;
