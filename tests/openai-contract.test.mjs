@@ -3,10 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   CODE_MODE_EXEC_CONSTRAINED_SAMPLING,
   CODE_MODE_EXEC_GRAMMAR,
-  assertOpenAICodeMode,
+  codeModeInputFormat,
   parseExecOptions,
   resolveLimits,
-  supportsOpenAICodeMode,
 } from "../src/index.ts";
 
 function model(overrides = {}) {
@@ -88,20 +87,16 @@ SOURCE: /[\\s\\S]+/`);
   });
 
   it("uses advertised transport capability rather than model-name checks", () => {
-    expect(supportsOpenAICodeMode(model({ id: "any-future-model" }))).toBe(true);
-    expect(supportsOpenAICodeMode(model({ api: "azure-openai-responses" }))).toBe(true);
-    expect(supportsOpenAICodeMode(model({ api: "openai-codex-responses" }))).toBe(true);
-    expect(supportsOpenAICodeMode(undefined)).toBe(false);
-    expect(supportsOpenAICodeMode(model({ compat: undefined }))).toBe(false);
-    expect(supportsOpenAICodeMode(model({ compat: { supportsOpenAIGrammarTools: false } }))).toBe(
-      false,
-    );
-    expect(supportsOpenAICodeMode(model({ api: "anthropic-messages" }))).toBe(false);
-    expect(() => assertOpenAICodeMode(model())).not.toThrow();
-    expect(() => assertOpenAICodeMode(undefined)).toThrow("requires a selected model");
-    expect(() => assertOpenAICodeMode(model({ api: "openai-completions" }))).toThrow(
-      "does not advertise it",
-    );
+    expect(codeModeInputFormat(model({ id: "any-future-model" }))).toBe("grammar");
+    for (const api of ["azure-openai-responses", "openai-codex-responses", "openai-completions"]) {
+      expect(codeModeInputFormat(model({ api }))).toBe("grammar");
+    }
+    expect(codeModeInputFormat(undefined)).toBe("json");
+    for (const compat of [undefined, {}, { supportsOpenAIGrammarTools: false }]) {
+      expect(codeModeInputFormat(model({ compat }))).toBe("json");
+      expect(codeModeInputFormat(model({ api: "openai-completions", compat }))).toBe("json");
+    }
+    expect(codeModeInputFormat(model({ api: "anthropic-messages" }))).toBe("json");
   });
 
   it("validates configured safety limits", () => {
