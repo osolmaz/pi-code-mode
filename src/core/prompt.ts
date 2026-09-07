@@ -1,5 +1,6 @@
 import type { CodeModeToolDescriptor } from "../broker/types.js";
 import type { CodeModeSessionContract } from "./mode.js";
+import type { CodeModeInputFormat } from "../provider/capabilities.js";
 
 export const CODE_MODE_WAIT_DESCRIPTION = `Observe an existing Code Mode cell. Returns only output produced since the previous observation. Use terminate=true to stop it.`;
 
@@ -9,13 +10,20 @@ function toolLines(descriptors: readonly CodeModeToolDescriptor[]): string {
     .join("\n");
 }
 
+export function codeModeInputInstruction(format: CodeModeInputFormat): string {
+  return format === "grammar"
+    ? "Send raw JavaScript to exec without JSON wrapping or Markdown fences."
+    : "Call exec with a JSON object containing a code string. Put JavaScript in code without Markdown fences.";
+}
+
 export function codeModeToolDescription(
   contract: CodeModeSessionContract,
   descriptors: readonly CodeModeToolDescriptor[],
+  format: CodeModeInputFormat,
 ): string {
   return `Execute JavaScript in an isolated V8 cell and compose the ${contract.mode} mode tools from code.
 
-Send raw JavaScript without JSON wrapping or Markdown fences. The source runs as the body of an async function. It has no Node.js, Deno, direct shell, file-system, network, environment, console, WebAssembly, or module capability. Use only the functions under tools.
+${codeModeInputInstruction(format)} The source runs as the body of an async function. It has no Node.js, Deno, direct shell, file-system, network, environment, console, WebAssembly, or module capability. Use only the functions under tools.
 
 Available globals:
 - tools: frozen async tool functions
@@ -36,6 +44,7 @@ Use sequential statements, conditions, loops, Promise.all, filtering, and aggreg
 export function codeModeSystemPrompt(
   contract: CodeModeSessionContract,
   descriptors: readonly CodeModeToolDescriptor[],
+  format: CodeModeInputFormat,
 ): string {
   const behavior =
     contract.mode === "codex"
@@ -43,7 +52,7 @@ export function codeModeSystemPrompt(
       : "Use the active vanilla Pi built-ins through tools. Their names, inputs, and results follow Pi's normal tool contracts.";
   return `You are working in Code Mode (${contract.mode} mode). The only model-visible tools are exec and wait.
 
-Use exec to write a JavaScript program that calls the available functions under tools. ${behavior} Send raw JavaScript, compose tool calls inside the program, and emit the useful final result with text(value). Use wait only when exec returns a waiting cell. Nested coding tools use the parent Pi process and calling harness permissions.
+Use exec to write a JavaScript program that calls the available functions under tools. ${behavior} ${codeModeInputInstruction(format)} Compose tool calls inside the program and emit the useful final result with text(value). Use wait only when exec returns a waiting cell. Nested coding tools use the parent Pi process and calling harness permissions.
 
 Available functions:
 ${toolLines(descriptors)}`;

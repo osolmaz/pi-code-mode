@@ -10,9 +10,9 @@ Pi Code Mode requires:
 - Linux on x64 or ARM64;
 - Node.js 22.19 or later;
 - Rust 1.96.1 when installing from source;
-- an OpenAI Responses model whose Pi model entry advertises `supportsOpenAIGrammarTools`.
+- a model and provider that support Pi tool calls.
 
-The extension checks the API capability. It does not check model names.
+Models use normal JSON tool calls by default. OpenAI-compatible Chat Completions and Responses models that advertise `supportsOpenAIGrammarTools` use raw grammar input for `exec`. The extension selects the format from the current model's API and capability metadata, including after a model switch. It does not check model names.
 
 ## Install the Pi extension
 
@@ -86,7 +86,13 @@ If the matching vanilla Pi built-ins are active when the session starts, Pi Code
 
 ## JavaScript cells
 
-Send raw JavaScript to `exec`. Do not wrap it in JSON or Markdown fences.
+Call `exec` with JavaScript in its `code` argument:
+
+```json
+{ "code": "text(1 + 1)" }
+```
+
+For grammar-capable models, send the same JavaScript as raw `exec` input without the JSON wrapper. Do not add Markdown fences in either format. Both formats use the same runtime, permissions, output handling, and `wait` tool.
 
 The cell provides:
 

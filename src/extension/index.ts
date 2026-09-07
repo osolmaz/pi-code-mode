@@ -24,6 +24,7 @@ import {
 } from "../core/mode.js";
 import {
   CODE_MODE_WAIT_DESCRIPTION,
+  codeModeInputInstruction,
   codeModeSystemPrompt,
   codeModeToolDescription,
 } from "../core/prompt.js";
@@ -33,7 +34,7 @@ import type { HostProcessOptions } from "../host/process.js";
 import { CodeModeHostManager, CodeModeHostSession } from "../host/session.js";
 import { createCodexTools } from "../modes/codex/tools.js";
 import { createPiTools } from "../modes/pi/tools.js";
-import { assertOpenAICodeMode } from "../provider/capabilities.js";
+import { codeModeInputFormat, type CodeModeInputFormat } from "../provider/capabilities.js";
 import { CODE_MODE_EXEC_CONSTRAINED_SAMPLING } from "../provider/exec-grammar.js";
 import {
   DEFAULT_CODE_MODE_OUTPUT_TOKENS,
@@ -319,6 +320,7 @@ function installCodeMode(
   const limits = resolveLimits(options.limits);
   let baselineTools: string[] | undefined;
   let contract: CodeModeSessionContract | undefined;
+  let inputFormat: CodeModeInputFormat = "json";
   let registrations: CodeModeToolRegistration[] = [];
   let collecting = false;
   const cellTraces = new Map<string, NestedToolTrace[]>();
@@ -372,17 +374,19 @@ function installCodeMode(
     pi.registerTool({
       name: "exec",
       label: "Code Mode",
-      description: codeModeToolDescription(currentContract, descriptors),
+      description: codeModeToolDescription(currentContract, descriptors, inputFormat),
       promptSnippet: `Execute JavaScript that composes ${currentContract.mode} mode tools`,
       promptGuidelines: [
-        "Send raw JavaScript to exec and call text(value) with the useful result.",
+        `${codeModeInputInstruction(inputFormat)} Call text(value) with the useful result.`,
         "Use wait only when exec returns a waiting cell identifier.",
       ],
       parameters: Type.Object(
         { code: Type.String({ description: "Raw JavaScript source" }) },
         { additionalProperties: false },
       ),
-      constrainedSampling: CODE_MODE_EXEC_CONSTRAINED_SAMPLING,
+      ...(inputFormat === "grammar"
+        ? { constrainedSampling: CODE_MODE_EXEC_CONSTRAINED_SAMPLING }
+        : {}),
       executionMode: "parallel",
       async execute(toolCallId, params, signal, _onUpdate, context) {
         const nestedToolTraces: NestedToolTrace[] = [];
@@ -536,6 +540,7 @@ function installCodeMode(
   }
 
   pi.on("session_start", async (_event, context) => {
+    inputFormat = codeModeInputFormat(context.model);
     const activeAtSessionStart = pi
       .getActiveTools()
       .filter((name) => name !== "exec" && name !== "wait");
@@ -561,12 +566,19 @@ function installCodeMode(
     activate();
   });
 
+  pi.on("model_select", (event) => {
+    const next = codeModeInputFormat(event.model);
+    if (next === inputFormat) return;
+    inputFormat = next;
+    registerTools();
+  });
+
   pi.on("before_agent_start", async (event, context) => {
-    assertOpenAICodeMode(context.model);
+    if (context.model === undefined) throw new Error("Code Mode requires a selected model");
     activate();
     await runtime.session();
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${codeModeSystemPrompt(runtime.contract, runtime.descriptors)}`,
+      systemPrompt: `${event.systemPrompt}\n\n${codeModeSystemPrompt(runtime.contract, runtime.descriptors, inputFormat)}`,
     };
   });
 

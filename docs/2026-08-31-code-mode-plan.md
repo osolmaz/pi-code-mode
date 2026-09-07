@@ -2,7 +2,7 @@
 title: Build full Pi Code Mode
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-08-31
-updated: 2026-09-01
+updated: 2026-09-07
 ---
 
 # Build full Pi Code Mode
@@ -28,8 +28,9 @@ The finished system will:
 
 - work as a normal Pi extension and as the standalone `pi-code-mode` command;
 - expose only `exec` and `wait` as provider tool schemas;
-- accept raw JavaScript when the provider advertises the required freeform grammar-tool capability;
-- select support through provider capabilities rather than model names;
+- accept a normal JSON tool call with one required `code` string by default;
+- accept raw JavaScript when an OpenAI-compatible API advertises grammar-tool capability;
+- select the input format through provider capabilities rather than model names;
 - let the user select `codex` or `pi` mode explicitly;
 - keep the selected mode fixed and recorded for the Pi session;
 - provide exact Codex coding tools in Codex mode;
@@ -123,7 +124,11 @@ The provider receives two tools in both modes.
 
 ### `exec`
 
-`exec` accepts raw JavaScript through a freeform grammar tool. The internal Pi representation can use one required `code` field, but the provider adapter must preserve raw source on the wire.
+`exec` accepts a normal JSON object with one required `code` string. On OpenAI-compatible Chat Completions and Responses APIs that advertise `supportsOpenAIGrammarTools`, it accepts raw JavaScript through a grammar tool instead. Both formats reach the same handler as `{ code }` and use the existing runtime. `wait` remains a normal JSON tool.
+
+The extension registers the matching tool definition and input instructions at session start and updates them through Pi's public `model_select` event. The selected coding mode, live cells, replay cache, permissions, and output limits do not change when the input format changes. No transport setting, extra session entry, new persistent data, or Pi internal change is needed.
+
+Tests must cover ordinary tool calls without grammar metadata, grammar-capable models, switching in both directions, JSON string escaping, execution errors, and `exec`/`wait` round trips through Pi's provider adapter. Remote model quality and provider availability still require a separate live canary.
 
 A program runs in a fresh V8 isolate. It can sequence, branch, loop, filter, aggregate, and run independent calls in parallel. It returns model-visible output only through `text()` and bounded notifications.
 

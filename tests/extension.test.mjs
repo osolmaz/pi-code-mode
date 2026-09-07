@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 
 import {
   CODE_MODE_COLLECT_EVENT,
@@ -104,8 +105,10 @@ function loadExtension(options = {}) {
 }
 
 describe("Pi extension", () => {
-  it("registers the OpenAI-shaped exec and wait contract", () => {
+  it("registers grammar exec only after a capable model is selected", async () => {
     const extension = loadExtension();
+    expect(extension.tools.get("exec")).not.toHaveProperty("constrainedSampling");
+    await extension.start();
     const exec = extension.tools.get("exec");
     const wait = extension.tools.get("wait");
 
@@ -152,22 +155,94 @@ describe("Pi extension", () => {
     });
   });
 
-  it("rejects providers that do not advertise OpenAI grammar tools", async () => {
-    const extension = loadExtension();
-    await extension.start();
-    const unsupported = {
-      ...SUPPORTED_MODEL,
-      provider: "other",
-      api: "openai-completions",
-      compat: {},
-    };
+  it.each(["openai-completions", "openai-responses", "anthropic-messages"])(
+    "uses JSON exec for %s without grammar support",
+    async (api) => {
+      const extension = loadExtension();
+      const model = { ...SUPPORTED_MODEL, api, compat: {} };
+      await extension.start({ model });
+      const prompt = await extension.events.get("before_agent_start")(
+        { systemPrompt: "base" },
+        extension.context({ model }),
+      );
+      const exec = extension.tools.get("exec");
+      expect(exec).not.toHaveProperty("constrainedSampling");
+      expect(exec.parameters.required).toEqual(["code"]);
+      expect(exec.parameters.additionalProperties).toBe(false);
+      for (const text of [exec.description, ...exec.promptGuidelines, prompt.systemPrompt]) {
+        expect(text).not.toContain("Send raw JavaScript");
+      }
+      expect(exec.description).toContain("JSON object containing a code string");
+      expect(prompt.systemPrompt).toContain("JSON object containing a code string");
+    },
+  );
 
+  it("rejects a missing selected model", async () => {
+    const extension = loadExtension();
+    await extension.start({ model: undefined });
     await expect(
       extension.events.get("before_agent_start")(
         { systemPrompt: "base" },
-        extension.context({ model: unsupported }),
+        extension.context({ model: undefined }),
       ),
-    ).rejects.toThrow("does not advertise it");
+    ).rejects.toThrow("requires a selected model");
+  });
+
+  it("switches both input formats without resetting cells or the session contract", async () => {
+    const extension = loadExtension();
+    await extension.start();
+    const originalEntries = [...extension.entries];
+    await extension.tools
+      .get("exec")
+      .execute(
+        "store-before-switch",
+        { code: 'store("kept", 42);' },
+        undefined,
+        undefined,
+        extension.context(),
+      );
+    const jsonModel = { ...SUPPORTED_MODEL, api: "openai-completions", compat: {} };
+    for (const model of [jsonModel, SUPPORTED_MODEL]) {
+      await extension.events.get("model_select")({ model }, extension.context({ model }));
+      const exec = extension.tools.get("exec");
+      const grammar = model === SUPPORTED_MODEL;
+      expect(exec.constrainedSampling).toEqual(
+        grammar ? CODE_MODE_EXEC_CONSTRAINED_SAMPLING : undefined,
+      );
+      const prompt = await extension.events.get("before_agent_start")(
+        { systemPrompt: "base" },
+        extension.context({ model }),
+      );
+      expect(prompt.systemPrompt.includes("Send raw JavaScript")).toBe(grammar);
+      expect(exec.description.includes("Send raw JavaScript")).toBe(grammar);
+      const result = await exec.execute(
+        `read-${model.api}`,
+        { code: 'text(load("kept"));' },
+        undefined,
+        undefined,
+        extension.context({ model }),
+      );
+      expect(result.content[0].text).toBe("42");
+      await extension.events.get("model_select")({ model }, extension.context({ model }));
+      expect(extension.tools.get("exec")).toBe(exec);
+    }
+    expect(extension.entries).toEqual(originalEntries);
+    expect([...extension.tools.keys()]).toEqual(["exec", "wait"]);
+  });
+
+  it("validates the JSON code argument before execution", () => {
+    const exec = loadExtension().tools.get("exec");
+    const validate = (args) =>
+      validateToolArguments(exec, {
+        type: "toolCall",
+        id: "validation",
+        name: "exec",
+        arguments: args,
+      });
+    expect(validate({ code: "text(1)" })).toEqual({ code: "text(1)" });
+    for (const args of [{}, { code: {} }, { code: ["text(1)"] }]) {
+      expect(() => validate(args)).toThrow();
+    }
   });
 
   it("executes raw JavaScript without an approval callback", async () => {
@@ -475,9 +550,11 @@ text(result.content[0].text);`,
     expect(result.content[0].text).toContain("Wait failed");
   });
 
-  it("returns guest failures as bounded tool results", async () => {
+  it.each([true, false])("returns guest failures with grammar=%s", async (grammar) => {
     const extension = loadExtension();
-    await extension.start();
+    await extension.start({
+      model: { ...SUPPORTED_MODEL, compat: { supportsOpenAIGrammarTools: grammar } },
+    });
     const result = await extension.tools
       .get("exec")
       .execute(

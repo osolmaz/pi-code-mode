@@ -57,7 +57,7 @@ export type {
   WriteStdinInput,
 } from "./process-manager.js";
 export { Workspace } from "./workspace.js";
-export { assertOpenAICodeMode, supportsOpenAICodeMode } from "./provider/capabilities.js";
+export { codeModeInputFormat, type CodeModeInputFormat } from "./provider/capabilities.js";
 export {
   CODE_MODE_EXEC_CONSTRAINED_SAMPLING,
   CODE_MODE_EXEC_GRAMMAR,
